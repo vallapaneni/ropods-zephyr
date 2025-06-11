@@ -11,6 +11,12 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/sys/util.h>
 
+/* Custom sensor attributes for ICM20948 */
+enum icm20948_sensor_attribute {
+	/** Enable/disable interrupt generation */
+	SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE = SENSOR_ATTR_PRIV_START,
+};
+
 /* Prevent macro redefinition warnings from lib/emd */
 #ifdef MAX
 #undef MAX
@@ -66,6 +72,9 @@ struct icm20948_data {
 	
 	/* Interrupt-driven data freshness tracking */
 	volatile bool data_ready_from_int;
+	
+	/* Interrupt control */
+	bool interrupt_enabled;
 	
 	/* Configuration */
 	uint8_t accel_range;

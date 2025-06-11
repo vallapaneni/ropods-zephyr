@@ -291,6 +291,9 @@ int icm20948_init(const struct device *dev)
 
 	data->dev = dev;
 
+	/* Initialize interrupt control flag */
+	data->interrupt_enabled = false;
+
 	ret = icm20948_spi_init(dev);
 	if (ret < 0) {
 		LOG_ERR("Failed to initialize transport: %d", ret);

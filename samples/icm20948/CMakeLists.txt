@@ -4,4 +4,7 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(icm20948_sample)
 
-target_sources(app PRIVATE src/main.c)
+# Add driver include path for custom attributes
+target_include_directories(app PRIVATE ../../drivers/sensor/icm20948)
+
+target_sources(app PRIVATE src/interrupt_control_demo.c)

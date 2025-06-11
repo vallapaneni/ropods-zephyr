@@ -74,7 +74,6 @@ int icm20948_trigger_set(const struct device *dev,
 {
 	struct icm20948_data *data = dev->data;
 	const struct icm20948_config *cfg = dev->config;
-	int ret;
 
 	if (trig->type != SENSOR_TRIG_DATA_READY) {
 		return -ENOTSUP;
@@ -84,23 +83,23 @@ int icm20948_trigger_set(const struct device *dev,
 		return -ENOTSUP;
 	}
 
+	/* Set the handler and trigger - do NOT enable interrupt automatically */
 	data->data_ready_handler = handler;
 	data->data_ready_trigger = trig;
 
-	if (handler == NULL) {
-		ret = gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_DISABLE);
+	/* If handler is NULL, disable interrupt if it was previously enabled */
+	if (handler == NULL && data->interrupt_enabled) {
+		int ret = gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_DISABLE);
 		if (ret < 0) {
 			LOG_ERR("Failed to disable GPIO interrupt");
 			return ret;
 		}
-		return 0;
+		data->interrupt_enabled = false;
 	}
 
-	ret = gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure GPIO interrupt");
-		return ret;
-	}
+	LOG_DBG("Trigger handler %s, interrupt state: %s", 
+		handler ? "set" : "cleared",
+		data->interrupt_enabled ? "enabled" : "disabled");
 
 	return 0;
 }
