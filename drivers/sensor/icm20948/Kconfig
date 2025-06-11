@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# InvenSense ICM-20948 9-axis motion sensor
+
+config ICM20948
+	bool "InvenSense ICM-20948 9-axis motion sensor"
+	depends on SPI && SENSOR
+	select ICM20948_SPI
+	help
+	  Enable driver for InvenSense ICM-20948 9-axis motion sensor.
+	  This driver supports SPI interface only.
+
+if ICM20948
+
+config ICM20948_SPI
+	bool "ICM-20948 SPI support"
+	depends on SPI
+	default y
+	help
+	  Enable SPI support for ICM-20948 sensor.
+
+config ICM20948_TRIGGER
+	bool "ICM-20948 Trigger Support"
+	depends on GPIO
+	help
+	  Enable trigger support for ICM-20948 sensor.
+
+if ICM20948_TRIGGER
+
+config ICM20948_TRIGGER_GLOBAL_THREAD
+	bool "Use global thread for triggers"
+	default y
+	help
+	  Use the global sensor trigger thread for interrupt handling.
+
+config ICM20948_TRIGGER_OWN_THREAD
+	bool "Use own thread for triggers"
+	help
+	  Use the sensor's own trigger thread for interrupt handling.
+
+config ICM20948_THREAD_STACK_SIZE
+	int "Thread stack size"
+	depends on ICM20948_TRIGGER_OWN_THREAD
+	default 1024
+	help
+	  Stack size for the sensor's own trigger thread.
+
+endif # ICM20948_TRIGGER
+
+config ICM20948_AUX_I2C
+	bool "Enable auxiliary I2C for magnetometer"
+	default y
+	help
+	  Enable auxiliary I2C interface for accessing the built-in
+	  AK09916 magnetometer.
+
+config ICM20948_DMP
+	bool "Enable DMP (Digital Motion Processor)"
+	default y
+	help
+	  Enable Digital Motion Processor (DMP) functionality.
+	  This loads the DMP firmware and enables advanced motion
+	  processing algorithms including sensor fusion, tap detection,
+	  and other motion-based features.
+
+endif # ICM20948
