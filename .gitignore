@@ -1,0 +1,85 @@
+# Zephyr build artifacts
+build/
+**/build*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Ninja
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Generated files
+*.hex
+*.bin
+*.elf
+*.map
+*.lst
+*.sym
+*.dis
+*.eep
+*.lss
+*.srec
+*.ihex
+
+# Debug files
+*.gdb
+*.jlink
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Editor backups
+*~
+*.bak
+*.orig
+
+# West workspace files (keep only in root workspace)
+.west/
+
+# Zephyr specific
+**/zephyr/.config
+**/zephyr/include/generated/
+**/zephyr/zephyr.dts
+**/zephyr/zephyr.dts.pre
+**/zephyr/*.pickle
+
+# Documentation build
+doc/_build/

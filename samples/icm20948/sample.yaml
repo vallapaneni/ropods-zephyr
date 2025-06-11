@@ -1,0 +1,20 @@
+sample:
+  name: ICM20948 Sensor Sample
+  description: Sample application for ICM20948 9-axis motion sensor
+tests:
+  sample.sensor.icm20948:
+    tags: sensor spi
+    depends_on: spi
+    platform_allow: 
+      - nrf52dk/nrf52840
+    integration_platforms:
+      - nrf52dk/nrf52840
+    harness: console
+    harness_config:
+      type: multi_line
+      ordered: false
+      regex:
+        - "ICM20948 device ready"
+        - "Accel:.*m/s²"
+        - "Gyro:.*rad/s"
+        - "Temperature:.*°C"

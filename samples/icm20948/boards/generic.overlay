@@ -1,0 +1,28 @@
+/*
+ * Copyright (c) 2024 ROPODS
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	aliases {
+		icm20948 = &icm20948;
+	};
+};
+
+&spi1 {
+	status = "okay";
+	cs-gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;
+
+	icm20948: icm20948@0 {
+		compatible = "invensense,icm20948";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		
+		/* Optional properties */
+		accel-range = <2>;    /* ±2g */
+		gyro-range = <250>;   /* ±250 dps */
+		
+		/* Optional interrupt pin */
+		/* int-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>; */
+	};
+};

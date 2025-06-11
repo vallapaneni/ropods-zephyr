@@ -1,0 +1,19 @@
+manifest:
+  defaults:
+    remote: zephyrproject-rtos
+    revision: v4.1.0
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.1.0
+      import:
+        # Import only essential modules for nRF52DK sensor development
+        name-allowlist:
+          - cmsis          # ARM CMSIS headers (required for ARM targets)
+          - hal_nordic     # Nordic HAL (required for nRF52DK/nRF52832)
+          - segger         # Segger RTT for debugging and logging
+  self:
+    path: ropods-zephyr

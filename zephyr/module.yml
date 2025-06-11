@@ -1,0 +1,6 @@
+name: ropods-zephyr
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .

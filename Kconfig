@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config ROPODS_DRIVERS
+	bool "ROPODS drivers"
+	help
+	  Enable ROPODS custom drivers
+
+if ROPODS_DRIVERS
+
+rsource "drivers/Kconfig"
+
+endif # ROPODS_DRIVERS
