@@ -8,6 +8,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
 #include <zephyr/types.h>
@@ -213,9 +214,11 @@ int icm20948_trigger_set(const struct device *dev,
 int icm20948_init_interrupt(const struct device *dev);
 #endif
 
-/* Function declarations */
+/* SPI Communication Functions */
 int icm20948_select_bank(const struct device *dev, uint8_t bank);
 int icm20948_spi_read(const struct device *dev, uint8_t reg, uint8_t *data, uint16_t len);
 int icm20948_spi_write(const struct device *dev, uint8_t reg, uint8_t *data, uint16_t len);
+int icm20948_spi_read_reg(const struct device *dev, uint8_t reg, uint8_t *value);
+int icm20948_spi_write_reg(const struct device *dev, uint8_t reg, uint8_t value);
 
 #endif /* ZEPHYR_DRIVERS_SENSOR_ICM20948_ICM20948_H_ */

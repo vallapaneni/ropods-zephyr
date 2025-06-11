@@ -39,3 +39,44 @@ properties:
       - 500
       - 1000
       - 2000
+
+  accel-dlpf:
+    type: int
+    default: 6
+    description: |
+      Digital Low Pass Filter setting for accelerometer.
+      Valid values are 0-7, where 7 disables the filter.
+    enum:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+
+  gyro-dlpf:
+    type: int
+    default: 6
+    description: |
+      Digital Low Pass Filter setting for gyroscope.
+      Valid values are 0-7, where 7 disables the filter.
+    enum:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+
+  mount-matrix:
+    type: array
+    description: |
+      Mounting matrix for sensor orientation transformation.
+      3x3 rotation matrix elements in row-major order.
+      Default is identity matrix (no transformation).
+      Each element should be -1, 0, or 1.
+    default: [1, 0, 0, 0, 1, 0, 0, 0, 1]

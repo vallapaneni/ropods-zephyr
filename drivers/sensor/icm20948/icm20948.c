@@ -18,66 +18,8 @@
 
 LOG_MODULE_REGISTER(ICM20948, CONFIG_SENSOR_LOG_LEVEL);
 
-int icm20948_spi_read(const struct device *dev, uint8_t reg, uint8_t *data, uint16_t len)
-{
-	const struct icm20948_config *config = dev->config;
-	const struct spi_buf tx_buf = {
-		.buf = &reg,
-		.len = 1,
-	};
-	const struct spi_buf_set tx = {
-		.buffers = &tx_buf,
-		.count = 1,
-	};
-	const struct spi_buf rx_buf[2] = {
-		{
-			.buf = NULL,
-			.len = 1,
-		},
-		{
-			.buf = data,
-			.len = len,
-		}
-	};
-	const struct spi_buf_set rx = {
-		.buffers = rx_buf,
-		.count = 2,
-	};
-
-	reg |= ICM20948_SPI_READ;
-
-	return spi_transceive_dt(&config->spi, &tx, &rx);
-}
-
-int icm20948_spi_write(const struct device *dev, uint8_t reg, uint8_t *data, uint16_t len)
-{
-	const struct icm20948_config *config = dev->config;
-	uint8_t tx_buffer[len + 1];
-	
-	tx_buffer[0] = reg;
-	memcpy(&tx_buffer[1], data, len);
-
-	const struct spi_buf tx_buf = {
-		.buf = tx_buffer,
-		.len = len + 1,
-	};
-	const struct spi_buf_set tx = {
-		.buffers = &tx_buf,
-		.count = 1,
-	};
-
-	return spi_transceive_dt(&config->spi, &tx, NULL);
-}
-
-int icm20948_select_bank(const struct device *dev, uint8_t bank)
-{
-	uint8_t bank_sel = bank;
-	return icm20948_spi_write(dev, ICM20948_REG_REG_BANK_SEL, &bank_sel, 1);
-}
-
 static int icm20948_reset(const struct device *dev)
 {
-	uint8_t reset_val = ICM20948_PWR_MGMT_1_DEVICE_RESET;
 	int ret;
 
 	ret = icm20948_select_bank(dev, ICM20948_BANK_0);
@@ -85,7 +27,7 @@ static int icm20948_reset(const struct device *dev)
 		return ret;
 	}
 
-	ret = icm20948_spi_write(dev, ICM20948_REG_PWR_MGMT_1, &reset_val, 1);
+	ret = icm20948_spi_write_reg(dev, ICM20948_REG_PWR_MGMT_1, ICM20948_PWR_MGMT_1_DEVICE_RESET);
 	if (ret) {
 		return ret;
 	}
@@ -114,7 +56,7 @@ static int icm20948_setup(const struct device *dev)
 		return ret;
 	}
 
-	ret = icm20948_spi_read(dev, ICM20948_REG_WHO_AM_I, &chip_id, 1);
+	ret = icm20948_spi_read_reg(dev, ICM20948_REG_WHO_AM_I, &chip_id);
 	if (ret) {
 		LOG_ERR("Failed to read chip ID");
 		return ret;
@@ -128,22 +70,19 @@ static int icm20948_setup(const struct device *dev)
 	LOG_INF("ICM20948 chip ID: 0x%02X", chip_id);
 
 	/* Disable I2C interface and enable SPI */
-	val = ICM20948_USER_CTRL_I2C_IF_DIS;
-	ret = icm20948_spi_write(dev, ICM20948_REG_USER_CTRL, &val, 1);
+	ret = icm20948_spi_write_reg(dev, ICM20948_REG_USER_CTRL, ICM20948_USER_CTRL_I2C_IF_DIS);
 	if (ret) {
 		return ret;
 	}
 
 	/* Wake up device and set clock source */
-	val = 0x01; /* Use best available clock source */
-	ret = icm20948_spi_write(dev, ICM20948_REG_PWR_MGMT_1, &val, 1);
+	ret = icm20948_spi_write_reg(dev, ICM20948_REG_PWR_MGMT_1, 0x01); /* Use best available clock source */
 	if (ret) {
 		return ret;
 	}
 
 	/* Enable accelerometer and gyroscope */
-	val = 0x00; /* Enable all axes */
-	ret = icm20948_spi_write(dev, ICM20948_REG_PWR_MGMT_2, &val, 1);
+	ret = icm20948_spi_write_reg(dev, ICM20948_REG_PWR_MGMT_2, 0x00); /* Enable all axes */
 	if (ret) {
 		return ret;
 	}
@@ -173,7 +112,7 @@ static int icm20948_setup(const struct device *dev)
 		break;
 	}
 
-	ret = icm20948_spi_write(dev, ICM20948_REG_GYRO_CONFIG_1, &val, 1);
+	ret = icm20948_spi_write_reg(dev, ICM20948_REG_GYRO_CONFIG_1, val);
 	if (ret) {
 		return ret;
 	}
@@ -197,7 +136,7 @@ static int icm20948_setup(const struct device *dev)
 		break;
 	}
 
-	ret = icm20948_spi_write(dev, ICM20948_REG_ACCEL_CONFIG, &val, 1);
+	ret = icm20948_spi_write_reg(dev, ICM20948_REG_ACCEL_CONFIG, val);
 	if (ret) {
 		return ret;
 	}

@@ -27,7 +27,7 @@ static void icm20948_handle_interrupt(const struct device *dev)
 		return;
 	}
 
-	ret = icm20948_spi_read(dev, ICM20948_REG_INT_STATUS, &int_status, 1);
+	ret = icm20948_spi_read_reg(dev, ICM20948_REG_INT_STATUS, &int_status);
 	if (ret) {
 		LOG_ERR("Failed to read interrupt status");
 		return;
@@ -106,7 +106,7 @@ int icm20948_trigger_set(const struct device *dev,
 
 		/* Enable/disable data ready interrupt */
 		val = handler ? 0x01 : 0x00;
-		ret = icm20948_spi_write(dev, ICM20948_REG_INT_ENABLE, &val, 1);
+		ret = icm20948_spi_write_reg(dev, ICM20948_REG_INT_ENABLE, val);
 		if (ret) {
 			return ret;
 		}
@@ -181,7 +181,7 @@ int icm20948_init_interrupt(const struct device *dev)
 
 	/* Configure interrupt pin as push-pull, active high, latched */
 	val = ICM20948_INT_LATCH_EN | ICM20948_INT_ANYRD_2CLEAR;
-	ret = icm20948_spi_write(dev, ICM20948_REG_INT_PIN_CFG, &val, 1);
+	ret = icm20948_spi_write_reg(dev, ICM20948_REG_INT_PIN_CFG, val);
 	if (ret) {
 		return ret;
 	}
