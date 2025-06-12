@@ -5,6 +5,7 @@
  */
 
 #include "icm20948_attr.h"
+#include "Invn/Devices/Drivers/ICM20948/Icm20948SelfTest.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(icm20948_attr, CONFIG_SENSOR_LOG_LEVEL);
@@ -76,6 +77,56 @@ static int icm20948_attr_set_full_scale(const struct device *dev,
 		LOG_WRN("Full scale range setting not supported for channel %d", chan);
 		ret = -ENOTSUP;
 		break;
+	}
+
+	return ret;
+}
+
+/**
+ * @brief Trigger self-test for ICM20948 sensors
+ *
+ * @param dev Pointer to the device structure
+ * @param chan Sensor channel (ignored - self-test runs on all sensors)
+ * @param val Pointer to trigger value (any non-zero value triggers self-test)
+ *
+ * @return 0 on success, negative error code on failure
+ */
+static int icm20948_attr_set_self_test(const struct device *dev,
+				       enum sensor_channel chan,
+				       const struct sensor_value *val)
+{
+	struct icm20948_data *data = dev->data;
+	int ret = 0;
+	
+	ARG_UNUSED(chan); /* Self-test applies to all sensors */
+
+	/* Only trigger self-test if value is non-zero */
+	if (val->val1 == 0 && val->val2 == 0) {
+		LOG_INF("Self-test not triggered (zero value)");
+		return 0;
+	}
+
+	LOG_INF("Triggering ICM20948 self-test");
+
+	/* Prepare bias arrays for self-test function */
+	int gyro_bias[3] = {0};
+	int accel_bias[3] = {0};
+
+	/* Run self-test via eMD library */
+	ret = inv_icm20948_run_selftest(&data->icm_device, gyro_bias, accel_bias);
+	
+	if (ret == 7) {  /* 7 = all sensors passed (compass | accel | gyro) */
+		LOG_INF("ICM20948 self-test completed successfully (result: %d)", ret);
+		LOG_INF("  Gyro bias: [%d, %d, %d]", gyro_bias[0], gyro_bias[1], gyro_bias[2]);
+		LOG_INF("  Accel bias: [%d, %d, %d]", accel_bias[0], accel_bias[1], accel_bias[2]);
+		ret = 0;  /* Convert to standard success code */
+	} else {
+		LOG_ERR("ICM20948 self-test failed with result: %d", ret);
+		LOG_ERR("  Expected: 7 (all sensors pass), Got: %d", ret);
+		if (!(ret & 0x1)) LOG_ERR("  → Gyroscope self-test failed");
+		if (!(ret & 0x2)) LOG_ERR("  → Accelerometer self-test failed");
+		if (!(ret & 0x4)) LOG_ERR("  → Compass self-test failed");
+		ret = -EIO;  /* Convert to standard error code */
 	}
 
 	return ret;
@@ -159,6 +210,10 @@ int icm20948_attr_set(const struct device *dev, enum sensor_channel chan,
 		ret = icm20948_attr_set_interrupt_enable(dev, chan, val);
 		break;
 
+	case SENSOR_ATTR_ICM20948_SELF_TEST:
+		ret = icm20948_attr_set_self_test(dev, chan, val);
+		break;
+
 	default:
 		LOG_WRN("Attribute %d not supported", attr);
 		ret = -ENOTSUP;
@@ -212,6 +267,12 @@ int icm20948_attr_get(const struct device *dev, enum sensor_channel chan,
 		LOG_WRN("Trigger support not compiled in");
 		ret = -ENOTSUP;
 #endif /* CONFIG_ICM20948_TRIGGER */
+		break;
+
+	case SENSOR_ATTR_ICM20948_SELF_TEST:
+		/* Self-test is write-only (trigger-only) attribute */
+		LOG_WRN("Self-test is a write-only (trigger) attribute");
+		ret = -EACCES;
 		break;
 
 	default:

@@ -15,6 +15,8 @@
 enum icm20948_sensor_attribute {
 	/** Enable/disable interrupt generation */
 	SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE = SENSOR_ATTR_PRIV_START,
+	/** Trigger self-test (write-only, any non-zero value triggers test) */
+	SENSOR_ATTR_ICM20948_SELF_TEST,
 };
 
 /* Prevent macro redefinition warnings from lib/emd */
