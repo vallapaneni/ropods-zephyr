@@ -13,8 +13,11 @@
 
 /* Custom sensor attributes for ICM20948 */
 enum icm20948_sensor_attribute {
-	/** Enable/disable interrupt generation */
-	SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE = SENSOR_ATTR_PRIV_START,
+	/** Enable/disable sensors with eMD sensor mask (0 = disable all, non-zero = enable based on mask) 
+	 *  Supported sensors: INV_ICM20948_SENSOR_ACCELEROMETER, INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR, INV_ICM20948_SENSOR_ROTATION_VECTOR
+	 *  
+	 *  The driver efficiently manages sensor state transitions by only enabling/disabling sensors that actually changed. */
+	SENSOR_ATTR_ICM20948_SENSOR_ENABLE = SENSOR_ATTR_PRIV_START,
 	/** Trigger self-test (write-only, any non-zero value triggers test) */
 	SENSOR_ATTR_ICM20948_SELF_TEST,
 };
@@ -77,6 +80,9 @@ struct icm20948_data {
 	
 	/* Interrupt control */
 	bool interrupt_enabled;
+	
+	/* Sensor enable mask */
+	uint32_t sensor_enable_mask;
 	
 	/* Configuration */
 	uint8_t accel_range;

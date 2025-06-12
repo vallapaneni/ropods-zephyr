@@ -133,59 +133,134 @@ static int icm20948_attr_set_self_test(const struct device *dev,
 }
 
 /**
- * @brief Enable or disable interrupt generation for ICM20948
+ * @brief Enable or disable sensors and interrupts for ICM20948
  *
  * @param dev Pointer to the device structure
- * @param chan Sensor channel to configure (ignored for interrupt control)
- * @param val Pointer to the enable value (0 = disable, non-zero = enable)
+ * @param chan Sensor channel to configure (ignored for sensor control)
+ * @param val Pointer to the sensor mask value (0 = disable all, non-zero = enable based on eMD sensor mask)
+ *        Use INV_ICM20948_SENSOR_* values from eMD library
  *
  * @return 0 on success, negative error code on failure
  */
-static int icm20948_attr_set_interrupt_enable(const struct device *dev,
-					      enum sensor_channel chan,
-					      const struct sensor_value *val)
+static int icm20948_attr_set_sensor_enable(const struct device *dev,
+					    enum sensor_channel chan,
+					    const struct sensor_value *val)
 {
-#ifdef CONFIG_ICM20948_TRIGGER
 	struct icm20948_data *data = dev->data;
-	const struct icm20948_config *cfg = dev->config;
-	bool enable = (val->val1 != 0);
+	uint32_t sensor_mask = (uint32_t)val->val1;
 	int ret;
 
-	ARG_UNUSED(chan); /* Interrupt control applies globally */
+	ARG_UNUSED(chan); /* Sensor control applies globally */
 
-	if (!cfg->int_gpio.port) {
-		LOG_WRN("No interrupt GPIO configured");
-		return -ENOTSUP;
+	LOG_INF("Setting sensor enable mask to 0x%08X", sensor_mask);
+
+	/* 
+	 * NOTE: We process the sensor mask bit by bit because the eMD library function
+	 * inv_icm20948_enable_sensor() only accepts individual sensor enums, not masks.
+	 * 
+	 * Function signature: int inv_icm20948_enable_sensor(struct inv_icm20948 * s, 
+	 *                                                     enum inv_icm20948_sensor sensor, 
+	 *                                                     inv_bool_t state)
+	 * 
+	 * The function expects:
+	 * - A single sensor enum (like INV_ICM20948_SENSOR_ACCELEROMETER)
+	 * - A simple boolean state (0 or 1)
+	 * 
+	 * It does NOT support sensor masks or bit combinations, so we must expand
+	 * the mask bit by bit and call the function for each individual sensor.
+	 */
+
+	uint32_t current_mask = data->sensor_enable_mask;
+	uint32_t sensors_to_disable = current_mask & ~sensor_mask;  /* Sensors that need to be disabled */
+	uint32_t sensors_to_enable = sensor_mask & ~current_mask;   /* Sensors that need to be enabled */
+
+	/* Disable sensors that are currently enabled but not in the new mask */
+	if (sensors_to_disable & BIT(INV_ICM20948_SENSOR_ACCELEROMETER)) {
+		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_ACCELEROMETER, 0);
+		if (ret != 0) {
+			LOG_ERR("Failed to disable accelerometer: %d", ret);
+			return -EIO;
+		}
+		LOG_INF("Accelerometer disabled");
+	}
+	
+	if (sensors_to_disable & BIT(INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR)) {
+		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR, 0);
+		if (ret != 0) {
+			LOG_ERR("Failed to disable game rotation vector: %d", ret);
+			return -EIO;
+		}
+		LOG_INF("Game rotation vector disabled");
+	}
+	
+	if (sensors_to_disable & BIT(INV_ICM20948_SENSOR_ROTATION_VECTOR)) {
+		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_ROTATION_VECTOR, 0);
+		if (ret != 0) {
+			LOG_ERR("Failed to disable rotation vector: %d", ret);
+			return -EIO;
+		}
+		LOG_INF("Rotation vector disabled");
 	}
 
-	LOG_INF("Setting interrupt enable to %s", enable ? "enabled" : "disabled");
-
-	if (enable && !data->interrupt_enabled) {
-		/* Enable GPIO interrupt */
-		ret = gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_EDGE_TO_ACTIVE);
-		if (ret < 0) {
-			LOG_ERR("Failed to enable GPIO interrupt: %d", ret);
-			return ret;
+	/* Enable sensors that are in the new mask but not currently enabled */
+	if (sensors_to_enable & BIT(INV_ICM20948_SENSOR_ACCELEROMETER)) {
+		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_ACCELEROMETER, 1);
+		if (ret != 0) {
+			LOG_ERR("Failed to enable accelerometer: %d", ret);
+			return -EIO;
 		}
-		data->interrupt_enabled = true;
-	} else if (!enable && data->interrupt_enabled) {
-		/* Disable GPIO interrupt */
-		ret = gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_DISABLE);
-		if (ret < 0) {
-			LOG_ERR("Failed to disable GPIO interrupt: %d", ret);
-			return ret;
+		LOG_INF("Accelerometer enabled");
+	}
+	
+	if (sensors_to_enable & BIT(INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR)) {
+		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR, 1);
+		if (ret != 0) {
+			LOG_ERR("Failed to enable game rotation vector: %d", ret);
+			return -EIO;
 		}
-		data->interrupt_enabled = false;
+		LOG_INF("Game rotation vector enabled");
+	}
+	
+	if (sensors_to_enable & BIT(INV_ICM20948_SENSOR_ROTATION_VECTOR)) {
+		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_ROTATION_VECTOR, 1);
+		if (ret != 0) {
+			LOG_ERR("Failed to enable rotation vector: %d", ret);
+			return -EIO;
+		}
+		LOG_INF("Rotation vector enabled");
 	}
 
+#ifdef CONFIG_ICM20948_TRIGGER
+	/* Manage GPIO interrupts based on sensor state */
+	const struct icm20948_config *cfg = dev->config;
+	if (cfg->int_gpio.port) {
+		if (sensor_mask == 0 && data->interrupt_enabled) {
+			/* Disable interrupts when no sensors are enabled */
+			ret = gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_DISABLE);
+			if (ret < 0) {
+				LOG_ERR("Failed to disable GPIO interrupt: %d", ret);
+				return ret;
+			}
+			data->interrupt_enabled = false;
+			LOG_INF("GPIO interrupts disabled");
+		} else if (sensor_mask != 0 && !data->interrupt_enabled) {
+			/* Enable interrupts when sensors are enabled */
+			ret = gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+			if (ret < 0) {
+				LOG_ERR("Failed to enable GPIO interrupt: %d", ret);
+				return ret;
+			}
+			data->interrupt_enabled = true;
+			LOG_INF("GPIO interrupts enabled");
+		}
+	}
+#endif
+
+	/* Update the stored sensor enable mask */
+	data->sensor_enable_mask = sensor_mask;
+
+	LOG_INF("Sensor enable operation completed successfully");
 	return 0;
-#else
-	LOG_WRN("Trigger support not compiled in");
-	ARG_UNUSED(dev);
-	ARG_UNUSED(chan);
-	ARG_UNUSED(val);
-	return -ENOTSUP;
-#endif /* CONFIG_ICM20948_TRIGGER */
 }
 
 int icm20948_attr_set(const struct device *dev, enum sensor_channel chan,
@@ -206,8 +281,8 @@ int icm20948_attr_set(const struct device *dev, enum sensor_channel chan,
 		ret = icm20948_attr_set_full_scale(dev, chan, val);
 		break;
 
-	case SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE:
-		ret = icm20948_attr_set_interrupt_enable(dev, chan, val);
+	case SENSOR_ATTR_ICM20948_SENSOR_ENABLE:
+		ret = icm20948_attr_set_sensor_enable(dev, chan, val);
 		break;
 
 	case SENSOR_ATTR_ICM20948_SELF_TEST:
@@ -255,18 +330,13 @@ int icm20948_attr_get(const struct device *dev, enum sensor_channel chan,
 		ret = -ENOTSUP; /* Not implemented yet */
 		break;
 
-	case SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE:
-#ifdef CONFIG_ICM20948_TRIGGER
+	case SENSOR_ATTR_ICM20948_SENSOR_ENABLE:
 		{
 			struct icm20948_data *data = dev->data;
-			val->val1 = data->interrupt_enabled ? 1 : 0;
+			val->val1 = (int32_t)data->sensor_enable_mask;
 			val->val2 = 0;
-			LOG_INF("Getting interrupt enable state: %d", val->val1);
+			LOG_INF("Getting sensor enable mask: 0x%08X", data->sensor_enable_mask);
 		}
-#else
-		LOG_WRN("Trigger support not compiled in");
-		ret = -ENOTSUP;
-#endif /* CONFIG_ICM20948_TRIGGER */
 		break;
 
 	case SENSOR_ATTR_ICM20948_SELF_TEST:
