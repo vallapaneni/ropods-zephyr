@@ -7,5 +7,5 @@ project(icm20948_sample)
 # Add driver include path for custom attributes
 target_include_directories(app PRIVATE ../../drivers/sensor/icm20948)
 
-# Build the self-test demo instead of interrupt demo
-target_sources(app PRIVATE src/self_test_demo.c)
+# Build the sensor enable demo to demonstrate new sensor enable functionality
+target_sources(app PRIVATE src/sensor_enable_demo.c)

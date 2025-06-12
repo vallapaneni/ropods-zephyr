@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  * 
- * Simple test for ICM20948 interrupt control functionality
+ * Simple test for ICM20948 sensor enable functionality
  */
 
 #include <zephyr/kernel.h>
@@ -26,7 +26,7 @@ static void dummy_trigger_handler(const struct device *dev,
 	LOG_INF("Dummy trigger handler called");
 }
 
-static int test_interrupt_control(void)
+static int test_sensor_enable_control(void)
 {
 	struct sensor_trigger trigger = {
 		.type = SENSOR_TRIG_DATA_READY,
@@ -35,7 +35,7 @@ static int test_interrupt_control(void)
 	struct sensor_value val;
 	int ret;
 
-	LOG_INF("=== Testing ICM20948 Interrupt Control ===");
+	LOG_INF("=== Testing ICM20948 Sensor Enable Control ===");
 
 	/* Test 1: Set trigger handler */
 	LOG_INF("Test 1: Setting trigger handler...");
@@ -46,70 +46,99 @@ static int test_interrupt_control(void)
 	}
 	LOG_INF("✓ Trigger handler set successfully");
 
-	/* Test 2: Check initial interrupt state (should be disabled) */
-	LOG_INF("Test 2: Checking initial interrupt state...");
+	/* Test 2: Check initial sensor enable state (should be disabled) */
+	LOG_INF("Test 2: Checking initial sensor enable state...");
 	ret = sensor_attr_get(icm20948_dev, SENSOR_CHAN_ALL, 
-			      SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE, &val);
+			      SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	if (ret) {
-		LOG_ERR("Failed to get interrupt state: %d", ret);
+		LOG_ERR("Failed to get sensor enable state: %d", ret);
 		return ret;
 	}
-	LOG_INF("✓ Initial interrupt state: %s", val.val1 ? "enabled" : "disabled");
+	LOG_INF("✓ Initial sensor enable state: 0x%08x", (uint32_t)val.val1);
 
-	/* Test 3: Enable interrupts */
-	LOG_INF("Test 3: Enabling interrupts...");
-	val.val1 = 1;
+	/* Test 3: Enable accelerometer only */
+	LOG_INF("Test 3: Enabling accelerometer only...");
+	val.val1 = BIT(INV_ICM20948_SENSOR_ACCELEROMETER);
 	val.val2 = 0;
 	ret = sensor_attr_set(icm20948_dev, SENSOR_CHAN_ALL, 
-			      SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE, &val);
+			      SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	if (ret) {
-		LOG_ERR("Failed to enable interrupts: %d", ret);
+		LOG_ERR("Failed to enable accelerometer: %d", ret);
 		return ret;
 	}
-	LOG_INF("✓ Interrupts enabled successfully");
+	LOG_INF("✓ Accelerometer enabled successfully");
 
-	/* Test 4: Verify interrupt state is enabled */
-	LOG_INF("Test 4: Verifying interrupt state...");
+	/* Test 4: Verify sensor enable state */
+	LOG_INF("Test 4: Verifying sensor enable state...");
 	ret = sensor_attr_get(icm20948_dev, SENSOR_CHAN_ALL, 
-			      SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE, &val);
+			      SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	if (ret) {
-		LOG_ERR("Failed to get interrupt state: %d", ret);
+		LOG_ERR("Failed to get sensor enable state: %d", ret);
 		return ret;
 	}
-	if (val.val1 != 1) {
-		LOG_ERR("Interrupt state verification failed: expected 1, got %d", val.val1);
+	if ((uint32_t)val.val1 != BIT(INV_ICM20948_SENSOR_ACCELEROMETER)) {
+		LOG_ERR("Sensor enable state verification failed: expected 0x%08x, got 0x%08x", 
+			BIT(INV_ICM20948_SENSOR_ACCELEROMETER), (uint32_t)val.val1);
 		return -1;
 	}
-	LOG_INF("✓ Interrupt state verified: enabled");
+	LOG_INF("✓ Sensor enable state verified: 0x%08x", (uint32_t)val.val1);
 
-	/* Test 5: Disable interrupts */
-	LOG_INF("Test 5: Disabling interrupts...");
+	/* Test 5: Enable accelerometer and game rotation vector */
+	LOG_INF("Test 5: Enabling accelerometer and game rotation vector...");
+	val.val1 = BIT(INV_ICM20948_SENSOR_ACCELEROMETER) | BIT(INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR);
+	val.val2 = 0;
+	ret = sensor_attr_set(icm20948_dev, SENSOR_CHAN_ALL, 
+			      SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
+	if (ret) {
+		LOG_ERR("Failed to enable accelerometer and game rotation vector: %d", ret);
+		return ret;
+	}
+	LOG_INF("✓ Accelerometer and game rotation vector enabled successfully");
+
+	/* Test 6: Verify sensor enable state */
+	LOG_INF("Test 6: Verifying sensor enable state...");
+	ret = sensor_attr_get(icm20948_dev, SENSOR_CHAN_ALL, 
+			      SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
+	if (ret) {
+		LOG_ERR("Failed to get sensor enable state: %d", ret);
+		return ret;
+	}
+	uint32_t expected_mask = BIT(INV_ICM20948_SENSOR_ACCELEROMETER) | BIT(INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR);
+	if ((uint32_t)val.val1 != expected_mask) {
+		LOG_ERR("Sensor enable state verification failed: expected 0x%08x, got 0x%08x", 
+			expected_mask, (uint32_t)val.val1);
+		return -1;
+	}
+	LOG_INF("✓ Sensor enable state verified: 0x%08x", (uint32_t)val.val1);
+
+	/* Test 7: Disable all sensors */
+	LOG_INF("Test 7: Disabling all sensors...");
 	val.val1 = 0;
 	val.val2 = 0;
 	ret = sensor_attr_set(icm20948_dev, SENSOR_CHAN_ALL, 
-			      SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE, &val);
+			      SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	if (ret) {
-		LOG_ERR("Failed to disable interrupts: %d", ret);
+		LOG_ERR("Failed to disable all sensors: %d", ret);
 		return ret;
 	}
-	LOG_INF("✓ Interrupts disabled successfully");
+	LOG_INF("✓ All sensors disabled successfully");
 
-	/* Test 6: Verify interrupt state is disabled */
-	LOG_INF("Test 6: Verifying interrupt state...");
+	/* Test 8: Verify sensor enable state is disabled */
+	LOG_INF("Test 8: Verifying all sensors disabled...");
 	ret = sensor_attr_get(icm20948_dev, SENSOR_CHAN_ALL, 
-			      SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE, &val);
+			      SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	if (ret) {
-		LOG_ERR("Failed to get interrupt state: %d", ret);
+		LOG_ERR("Failed to get sensor enable state: %d", ret);
 		return ret;
 	}
-	if (val.val1 != 0) {
-		LOG_ERR("Interrupt state verification failed: expected 0, got %d", val.val1);
+	if ((uint32_t)val.val1 != 0) {
+		LOG_ERR("Sensor enable state verification failed: expected 0, got 0x%08x", (uint32_t)val.val1);
 		return -1;
 	}
-	LOG_INF("✓ Interrupt state verified: disabled");
+	LOG_INF("✓ Sensor enable state verified: all disabled");
 
-	/* Test 7: Clear trigger handler */
-	LOG_INF("Test 7: Clearing trigger handler...");
+	/* Test 9: Clear trigger handler */
+	LOG_INF("Test 9: Clearing trigger handler...");
 	ret = sensor_trigger_set(icm20948_dev, &trigger, NULL);
 	if (ret) {
 		LOG_ERR("Failed to clear trigger handler: %d", ret);
@@ -133,8 +162,8 @@ int main(void)
 
 	LOG_INF("ICM20948 device is ready");
 
-	/* Run the interrupt control tests */
-	int ret = test_interrupt_control();
+	/* Run the sensor enable control tests */
+	int ret = test_sensor_enable_control();
 	if (ret) {
 		LOG_ERR("Test failed with error: %d", ret);
 		return -1;
@@ -146,19 +175,38 @@ int main(void)
 	LOG_INF("Testing basic sensor reading...");
 	struct sensor_value accel[3];
 	
-	ret = sensor_sample_fetch(icm20948_dev);
+	/* Enable accelerometer for testing */
+	struct sensor_value val;
+	val.val1 = BIT(INV_ICM20948_SENSOR_ACCELEROMETER);
+	val.val2 = 0;
+	ret = sensor_attr_set(icm20948_dev, SENSOR_CHAN_ALL, 
+			      SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	if (ret) {
-		LOG_ERR("Failed to fetch sensor data: %d", ret);
+		LOG_ERR("Failed to enable accelerometer for test: %d", ret);
 	} else {
-		ret = sensor_channel_get(icm20948_dev, SENSOR_CHAN_ACCEL_XYZ, accel);
+		/* Wait a moment for sensor to stabilize */
+		k_sleep(K_MSEC(100));
+		
+		ret = sensor_sample_fetch(icm20948_dev);
 		if (ret) {
-			LOG_ERR("Failed to get accelerometer data: %d", ret);
+			LOG_ERR("Failed to fetch sensor data: %d", ret);
 		} else {
-			LOG_INF("Accel: X=%.3f Y=%.3f Z=%.3f m/s²",
-				sensor_value_to_double(&accel[0]),
-				sensor_value_to_double(&accel[1]),
-				sensor_value_to_double(&accel[2]));
+			ret = sensor_channel_get(icm20948_dev, SENSOR_CHAN_ACCEL_XYZ, accel);
+			if (ret) {
+				LOG_ERR("Failed to get accelerometer data: %d", ret);
+			} else {
+				LOG_INF("Accel: X=%d.%06d Y=%d.%06d Z=%d.%06d m/s²",
+					accel[0].val1, abs(accel[0].val2),
+					accel[1].val1, abs(accel[1].val2),
+					accel[2].val1, abs(accel[2].val2));
+			}
 		}
+		
+		/* Disable sensors after test */
+		val.val1 = 0;
+		val.val2 = 0;
+		sensor_attr_set(icm20948_dev, SENSOR_CHAN_ALL, 
+				SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	}
 
 	return 0;

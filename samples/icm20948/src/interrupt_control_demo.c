@@ -1,12 +1,11 @@
 /*
  * SPDX-License-Identifier: Apache-2.0
  * 
- * ICM20948 sensor sample with separated interrupt control
+ * ICM20948 sensor sample with sensor enable control
  * 
  * This sample demonstrates how to use the ICM20948 sensor driver with
- * interrupt control separated from trigger setup. The application can
- * control when interrupts are enabled/disabled independently of the
- * trigger handler configuration.
+ * the new sensor enable functionality that controls both sensors and
+ * interrupts through a single mask-based attribute.
  */
 
 #include <zephyr/kernel.h>
@@ -15,7 +14,7 @@
 #include <zephyr/logging/log.h>
 #include "icm20948.h"  /* For custom sensor attributes */
 
-LOG_MODULE_REGISTER(icm20948_interrupt_control, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(icm20948_sensor_enable_control, LOG_LEVEL_INF);
 
 /* Get the ICM20948 device from devicetree */
 #define ICM20948_NODE DT_NODELABEL(icm20948)
@@ -87,37 +86,41 @@ static void print_sensor_data(const struct device *dev)
 	}
 }
 
-static int set_interrupt_enable(const struct device *dev, bool enable)
+static int set_sensor_enable(const struct device *dev, uint32_t sensor_mask)
 {
 	struct sensor_value val;
 	int ret;
 
-	val.val1 = enable ? 1 : 0;
+	val.val1 = sensor_mask;
 	val.val2 = 0;
 
-	ret = sensor_attr_set(dev, SENSOR_CHAN_ALL, SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE, &val);
+	ret = sensor_attr_set(dev, SENSOR_CHAN_ALL, SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	if (ret) {
-		LOG_ERR("Failed to %s interrupts: %d", enable ? "enable" : "disable", ret);
+		LOG_ERR("Failed to set sensor enable mask to 0x%08x: %d", sensor_mask, ret);
 		return ret;
 	}
 
-	LOG_INF("Interrupts %s", enable ? "enabled" : "disabled");
+	if (sensor_mask == 0) {
+		LOG_INF("All sensors disabled");
+	} else {
+		LOG_INF("Sensors enabled with mask: 0x%08x", sensor_mask);
+	}
 	return 0;
 }
 
-static int get_interrupt_enable(const struct device *dev)
+static int get_sensor_enable(const struct device *dev)
 {
 	struct sensor_value val;
 	int ret;
 
-	ret = sensor_attr_get(dev, SENSOR_CHAN_ALL, SENSOR_ATTR_ICM20948_INTERRUPT_ENABLE, &val);
+	ret = sensor_attr_get(dev, SENSOR_CHAN_ALL, SENSOR_ATTR_ICM20948_SENSOR_ENABLE, &val);
 	if (ret) {
-		LOG_ERR("Failed to get interrupt enable state: %d", ret);
+		LOG_ERR("Failed to get sensor enable state: %d", ret);
 		return ret;
 	}
 
-	LOG_INF("Interrupt enable state: %s", val.val1 ? "enabled" : "disabled");
-	return val.val1;
+	LOG_INF("Sensor enable state: 0x%08x", (uint32_t)val.val1);
+	return (uint32_t)val.val1;
 }
 
 int main(void)
@@ -128,8 +131,8 @@ int main(void)
 	};
 	int ret;
 
-	LOG_INF("ICM20948 Sensor Sample with Interrupt Control");
-	LOG_INF("==============================================");
+	LOG_INF("ICM20948 Sensor Sample with Sensor Enable Control");
+	LOG_INF("==================================================");
 
 	/* Check if device is ready */
 	if (!device_is_ready(icm20948_dev)) {
@@ -139,7 +142,7 @@ int main(void)
 
 	LOG_INF("ICM20948 device is ready");
 
-	/* Phase 1: Set up trigger handler (but don't enable interrupts yet) */
+	/* Phase 1: Set up trigger handler (but don't enable sensors yet) */
 	LOG_INF("\n--- Phase 1: Setting up trigger handler ---");
 	ret = sensor_trigger_set(icm20948_dev, &trigger, icm20948_trigger_handler);
 	if (ret) {
@@ -149,31 +152,37 @@ int main(void)
 
 	LOG_INF("Trigger handler set successfully");
 
-	/* Check initial interrupt state */
-	get_interrupt_enable(icm20948_dev);
+	/* Check initial sensor enable state */
+	get_sensor_enable(icm20948_dev);
 
-	/* Phase 2: Polling mode (interrupts disabled) */
-	LOG_INF("\n--- Phase 2: Polling mode (5 seconds) ---");
-	for (int i = 0; i < 5; i++) {
-		print_sensor_data(icm20948_dev);
+	/* Phase 2: Polling mode (all sensors disabled) */
+	LOG_INF("\n--- Phase 2: Polling mode (all sensors disabled) ---");
+	for (int i = 0; i < 3; i++) {
+		LOG_INF("Attempting to read sensor data (should fail)...");
+		ret = sensor_sample_fetch(icm20948_dev);
+		if (ret) {
+			LOG_INF("✓ Expected: sensor_sample_fetch failed: %d (sensors disabled)", ret);
+		} else {
+			LOG_WRN("Unexpected: sensor_sample_fetch succeeded despite sensors being disabled");
+		}
 		k_sleep(K_SECONDS(1));
 	}
 
-	LOG_INF("Interrupt count during polling: %d", interrupt_count);
+	LOG_INF("Interrupt count during disabled state: %d", interrupt_count);
 
-	/* Phase 3: Enable interrupts and use interrupt-driven mode */
-	LOG_INF("\n--- Phase 3: Enabling interrupts ---");
-	ret = set_interrupt_enable(icm20948_dev, true);
+	/* Phase 3: Enable accelerometer only */
+	LOG_INF("\n--- Phase 3: Enabling accelerometer only ---");
+	ret = set_sensor_enable(icm20948_dev, BIT(INV_ICM20948_SENSOR_ACCELEROMETER));
 	if (ret) {
 		return -1;
 	}
 
-	/* Verify interrupt state */
-	get_interrupt_enable(icm20948_dev);
+	/* Verify sensor enable state */
+	get_sensor_enable(icm20948_dev);
 
-	LOG_INF("\n--- Phase 4: Interrupt-driven mode (10 seconds) ---");
+	LOG_INF("\n--- Phase 4: Accelerometer-only mode (5 seconds) ---");
 	uint32_t start_time = k_uptime_get_32();
-	while (k_uptime_get_32() - start_time < 10000) { /* 10 seconds */
+	while (k_uptime_get_32() - start_time < 5000) { /* 5 seconds */
 		if (data_ready) {
 			data_ready = false;
 			print_sensor_data(icm20948_dev);
@@ -181,37 +190,66 @@ int main(void)
 		k_sleep(K_MSEC(10)); /* Small delay to prevent busy waiting */
 	}
 
-	LOG_INF("Total interrupts received: %d", interrupt_count);
+	LOG_INF("Interrupts with accelerometer only: %d", interrupt_count);
 
-	/* Phase 5: Disable interrupts and return to polling */
-	LOG_INF("\n--- Phase 5: Disabling interrupts ---");
-	ret = set_interrupt_enable(icm20948_dev, false);
+	/* Phase 5: Enable accelerometer and game rotation vector */
+	LOG_INF("\n--- Phase 5: Enabling accelerometer and game rotation vector ---");
+	uint32_t accel_grv_mask = BIT(INV_ICM20948_SENSOR_ACCELEROMETER) | BIT(INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR);
+	ret = set_sensor_enable(icm20948_dev, accel_grv_mask);
 	if (ret) {
 		return -1;
 	}
 
-	/* Verify interrupt state */
-	get_interrupt_enable(icm20948_dev);
+	/* Verify sensor enable state */
+	get_sensor_enable(icm20948_dev);
 
-	LOG_INF("\n--- Phase 6: Back to polling mode (5 seconds) ---");
+	LOG_INF("\n--- Phase 6: Accelerometer + Game Rotation Vector mode (5 seconds) ---");
+	start_time = k_uptime_get_32();
+	while (k_uptime_get_32() - start_time < 5000) { /* 5 seconds */
+		if (data_ready) {
+			data_ready = false;
+			print_sensor_data(icm20948_dev);
+		}
+		k_sleep(K_MSEC(10)); /* Small delay to prevent busy waiting */
+	}
+
+	LOG_INF("Total interrupts with accel+game rotation vector: %d", interrupt_count);
+
+	/* Phase 7: Disable all sensors and return to polling */
+	LOG_INF("\n--- Phase 7: Disabling all sensors ---");
+	ret = set_sensor_enable(icm20948_dev, 0);
+	if (ret) {
+		return -1;
+	}
+
+	/* Verify sensor enable state */
+	get_sensor_enable(icm20948_dev);
+
+	LOG_INF("\n--- Phase 8: Back to disabled state (3 seconds) ---");
 	int count_before_disable = interrupt_count;
-	for (int i = 0; i < 5; i++) {
-		print_sensor_data(icm20948_dev);
+	for (int i = 0; i < 3; i++) {
+		LOG_INF("Attempting to read sensor data (should fail)...");
+		ret = sensor_sample_fetch(icm20948_dev);
+		if (ret) {
+			LOG_INF("✓ Expected: sensor_sample_fetch failed: %d (sensors disabled)", ret);
+		} else {
+			LOG_WRN("Unexpected: sensor_sample_fetch succeeded despite sensors being disabled");
+		}
 		k_sleep(K_SECONDS(1));
 	}
 
 	LOG_INF("Interrupt count after disable: %d (should be %d)", 
 		interrupt_count, count_before_disable);
 
-	/* Phase 7: Re-enable interrupts to demonstrate control */
-	LOG_INF("\n--- Phase 7: Re-enabling interrupts (5 seconds) ---");
-	ret = set_interrupt_enable(icm20948_dev, true);
+	/* Phase 9: Re-enable accelerometer to demonstrate control */
+	LOG_INF("\n--- Phase 9: Re-enabling accelerometer (3 seconds) ---");
+	ret = set_sensor_enable(icm20948_dev, BIT(INV_ICM20948_SENSOR_ACCELEROMETER));
 	if (ret) {
 		return -1;
 	}
 
 	start_time = k_uptime_get_32();
-	while (k_uptime_get_32() - start_time < 5000) { /* 5 seconds */
+	while (k_uptime_get_32() - start_time < 3000) { /* 3 seconds */
 		if (data_ready) {
 			data_ready = false;
 			print_sensor_data(icm20948_dev);
@@ -221,18 +259,18 @@ int main(void)
 
 	LOG_INF("Final interrupt count: %d", interrupt_count);
 
-	/* Cleanup: disable interrupts */
-	set_interrupt_enable(icm20948_dev, false);
+	/* Cleanup: disable all sensors */
+	set_sensor_enable(icm20948_dev, 0);
 
 	LOG_INF("\n=== Sample completed successfully ===");
 	LOG_INF("This sample demonstrated:");
-	LOG_INF("1. Setting trigger handler without enabling interrupts");
-	LOG_INF("2. Polling mode operation");
-	LOG_INF("3. Enabling interrupts via attribute");
-	LOG_INF("4. Interrupt-driven operation");
-	LOG_INF("5. Disabling interrupts via attribute");
-	LOG_INF("6. Returning to polling mode");
-	LOG_INF("7. Dynamic interrupt control");
+	LOG_INF("1. Setting trigger handler without enabling sensors");
+	LOG_INF("2. Sensor fetch failure when sensors are disabled");
+	LOG_INF("3. Enabling individual sensors via mask");
+	LOG_INF("4. Interrupt-driven operation when sensors are enabled");
+	LOG_INF("5. Enabling multiple sensors simultaneously");
+	LOG_INF("6. Disabling all sensors via zero mask");
+	LOG_INF("7. Dynamic sensor enable/disable control");
 
 	return 0;
 }

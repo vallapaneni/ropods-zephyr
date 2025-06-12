@@ -376,16 +376,9 @@ int icm20948_init(const struct device *dev)
 	/* Apply mounting matrix to sensors using eMD library */
 	icm20948_apply_mounting_matrix(dev);
 
-	/* Enable sensors */
-	uint32_t sensor_mask = INV_ICM20948_SENSOR_ACCELEROMETER | 
-			       INV_ICM20948_SENSOR_GYROSCOPE |
-			       INV_ICM20948_SENSOR_GEOMAGNETIC_FIELD;
-
-	ret = inv_icm20948_enable_sensor(&data->icm_device, sensor_mask, 1);
-	if (ret != 0) {
-		LOG_ERR("Failed to enable sensors: %d", ret);
-		return -EIO;
-	}
+	/* Don't automatically enable sensors - let application control which sensors to enable */
+	LOG_INF("Sensors are disabled by default - use SENSOR_ATTR_ICM20948_SENSOR_ENABLE to enable sensors");
+	data->sensor_enable_mask = 0;
 
 #ifdef CONFIG_ICM20948_TRIGGER
 	ret = icm20948_init_interrupt(dev);
