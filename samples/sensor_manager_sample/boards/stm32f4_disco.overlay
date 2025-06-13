@@ -1,0 +1,31 @@
+/*
+ * Copyright (c) 2024 ROPODS
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * ICM20948 overlay for STM32F4 Discovery
+ */
+
+/ {
+	aliases {
+		icm20948 = &icm20948;
+	};
+};
+
+&spi1 {
+	status = "okay";
+	pinctrl-0 = <&spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
+
+	icm20948: icm20948@0 {
+		compatible = "invensense,icm20948";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		
+		accel-range = <2>;    /* ±2g */
+		gyro-range = <250>;   /* ±250 dps */
+		
+		/* INT pin connected to PA8 */
+		int-gpios = <&gpioa 8 GPIO_ACTIVE_HIGH>;
+	};
+};

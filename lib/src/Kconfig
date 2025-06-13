@@ -1,0 +1,56 @@
+# Kconfig for Sensor Manager
+
+config SENSOR_MANAGER
+	bool "Enable Sensor Manager"
+	default y
+	depends on SENSOR
+	help
+	  Enable the sensor manager library for handling multiple sensor devices
+	  with timestamped data buffering and trigger-based data acquisition.
+
+if SENSOR_MANAGER
+
+config SENSOR_MANAGER_MAX_DEVICES
+	int "Maximum number of sensor devices"
+	default 8
+	range 1 32
+	help
+	  Maximum number of sensor devices that can be managed simultaneously.
+
+config SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE
+	int "Maximum channels per device"
+	default 16
+	range 1 64
+	help
+	  Maximum number of channels that can be enabled per sensor device.
+
+config SENSOR_MANAGER_DEFAULT_BUFFER_SIZE
+	int "Default buffer size (entries)"
+	default 64
+	range 8 1024
+	help
+	  Default number of data entries to buffer per sensor device.
+	  Each entry contains timestamp and sensor value.
+
+config SENSOR_MANAGER_LOG_LEVEL
+	int "Sensor Manager log level"
+	default 3
+	range 0 4
+	help
+	  Log level for sensor manager:
+	  0 = Off, 1 = Error, 2 = Warning, 3 = Info, 4 = Debug
+
+config SENSOR_MANAGER_DEBUG
+	bool "Enable debug mode"
+	default n
+	help
+	  Enable debug mode for additional logging and validation.
+
+config SENSOR_MANAGER_THREAD_SAFE
+	bool "Thread-safe operations"
+	default y
+	help
+	  Enable thread-safe operations using mutexes. Disable only if
+	  sensor manager will be used from a single thread.
+
+endif # SENSOR_MANAGER

@@ -10,3 +10,14 @@ if ROPODS_DRIVERS
 rsource "drivers/Kconfig"
 
 endif # ROPODS_DRIVERS
+
+config ROPODS_LIBRARIES
+	bool "ROPODS libraries"
+	help
+	  Enable ROPODS custom libraries
+
+if ROPODS_LIBRARIES
+
+rsource "lib/src/Kconfig"
+
+endif # ROPODS_LIBRARIES

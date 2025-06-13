@@ -1,0 +1,20 @@
+sample:
+  name: Sensor Manager Sample
+  description: Demonstrates the sensor manager library with multiple sensor devices
+tests:
+  sample.sensor_manager.basic:
+    harness: console
+    harness_config:
+      type: multi_line
+      regex:
+        - "Sensor manager initialized successfully"
+        - "Main loop iteration:"
+    platform_allow: 
+      - nrf52840dk_nrf52840
+      - nrf52dk_nrf52832
+      - stm32f4_disco
+    tags: sensors
+    depends_on:
+      - sensor
+      - spi
+      - gpio
