@@ -21,9 +21,16 @@ enum icm20948_sensor_attribute {
 	SENSOR_ATTR_ICM20948_SENSOR_ENABLE = SENSOR_ATTR_PRIV_START,
 	/** Trigger self-test (write-only, any non-zero value triggers test) */
 	SENSOR_ATTR_ICM20948_SELF_TEST,
-	/** Get data length for a specific channel (read-only, returns number of sensor_value elements needed) */
-	SENSOR_ATTR_ICM20948_DATA_LENGTH,
 };
+
+/** 
+ * Generic sensor attribute to get data length for a specific channel
+ * (read-only, returns number of sensor_value elements needed)
+ * 
+ * This is defined as a generic attribute that can be used by any sensor driver.
+ * Usage: sensor_attr_get(dev, channel, SENSOR_ATTR_DATA_LENGTH, &length);
+ */
+#define SENSOR_ATTR_DATA_LENGTH		(SENSOR_ATTR_PRIV_START + 100)
 
 /* Custom sensor channels for ICM20948 */
 enum icm20948_sensor_channel {

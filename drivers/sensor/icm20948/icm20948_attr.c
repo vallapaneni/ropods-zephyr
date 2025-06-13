@@ -307,7 +307,7 @@ int icm20948_attr_set(const struct device *dev, enum sensor_channel chan,
 		ret = icm20948_attr_set_self_test(dev, chan, val);
 		break;
 
-	case SENSOR_ATTR_ICM20948_DATA_LENGTH:
+	case SENSOR_ATTR_DATA_LENGTH:
 		/* Data length is a read-only attribute */
 		LOG_WRN("Data length is a read-only attribute");
 		ret = -EACCES;
@@ -369,7 +369,7 @@ int icm20948_attr_get(const struct device *dev, enum sensor_channel chan,
 		ret = -EACCES;
 		break;
 
-	case SENSOR_ATTR_ICM20948_DATA_LENGTH:
+	case SENSOR_ATTR_DATA_LENGTH:
 		/* Return the number of sensor_value elements needed for the specified channel */
 		switch (chan) {
 		case SENSOR_CHAN_ACCEL_XYZ:

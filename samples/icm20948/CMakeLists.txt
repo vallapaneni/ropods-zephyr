@@ -7,5 +7,12 @@ project(icm20948_sample)
 # Add driver include path for custom attributes
 target_include_directories(app PRIVATE ../../drivers/sensor/icm20948)
 
-# Build the sensor enable demo to demonstrate new sensor enable functionality
-target_sources(app PRIVATE src/sensor_enable_demo.c)
+# Choose which demo to build (default: sensor_enable_demo)
+if(DEFINED CONFIG_DEMO_PACKED_ACCURACY)
+    target_sources(app PRIVATE src/packed_accuracy_demo.c)
+    message(STATUS "Building packed accuracy demo")
+else()
+    # Build the sensor enable demo to demonstrate new sensor enable functionality
+    target_sources(app PRIVATE src/sensor_enable_demo.c)
+    message(STATUS "Building sensor enable demo")
+endif()
