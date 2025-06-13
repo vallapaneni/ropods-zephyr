@@ -9,6 +9,11 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Define SENSOR_ATTR_DATA_LENGTH if not available in Zephyr */
+#ifndef SENSOR_ATTR_DATA_LENGTH
+#define SENSOR_ATTR_DATA_LENGTH 118
+#endif
+
 LOG_MODULE_REGISTER(sensor_manager, CONFIG_SENSOR_MANAGER_LOG_LEVEL);
 
 /* Global sensor manager instance */
@@ -33,7 +38,7 @@ static struct sensor_device_info *find_device_info(const struct device *device)
 }
 
 /**
- * @brief Internal data ready callback handler
+ * @brief Internal data ready callback handler with optimized zero-copy and fixed sample size
  */
 static void internal_data_ready_handler(const struct device *device,
                                        const struct sensor_trigger *trigger)
@@ -44,48 +49,107 @@ static void internal_data_ready_handler(const struct device *device,
         return;
     }
 
-    int64_t timestamp = k_uptime_get();
+    uint32_t timestamp_ms = (uint32_t)(k_uptime_get() / 1000); /* Convert μs to ms */
     int ret;
 
     /* Increment data ready counter */
     dev_info->data_ready_count++;
 
-    /* Fetch sensor sample */
-    ret = sensor_sample_fetch(device);
-    if (ret != 0) {
-        LOG_ERR("Failed to fetch sensor sample: %d", ret);
-        return;
+    /* Fetch sensor sample if not pre-fetched */
+    if (!dev_info->samples_prefetched) {
+        ret = sensor_sample_fetch(device);
+        if (ret != 0) {
+            LOG_ERR("Failed to fetch sensor sample: %d", ret);
+            return;
+        }
     }
 
     /* Lock buffer for data storage */
     k_mutex_lock(&dev_info->buffer_mutex, K_FOREVER);
 
-    /* Read all enabled channels and store in buffer */
+    /* Use pre-computed fixed sample block size */
+    size_t sample_size = dev_info->sample_block_size;
+
+    /* Ensure we have enough space by removing old samples if needed (always keep latest data) */
+    while (ring_buf_space_get(&dev_info->data_buffer) < sample_size && 
+           !ring_buf_is_empty(&dev_info->data_buffer)) {
+        
+        /* Efficiently remove one complete sample by advancing read pointer */
+        uint8_t *read_ptr;
+        uint32_t available_bytes = ring_buf_get_claim(&dev_info->data_buffer, &read_ptr, sample_size);
+        
+        if (available_bytes >= sample_size) {
+            /* Successfully claim and discard one complete sample */
+            ring_buf_get_finish(&dev_info->data_buffer, sample_size);
+            dev_info->buffer_overflow_count++;
+        } else {
+            /* Not enough contiguous data or corrupted buffer, reset */
+            ring_buf_reset(&dev_info->data_buffer);
+            break;
+        }
+    }
+
+    /* Reserve space in ring buffer and get direct write pointers */
+    uint8_t *write_ptr;
+    uint32_t available_space;
+    
+    /* Get contiguous space for writing - guaranteed to succeed since buffer size is multiple of sample size */
+    available_space = ring_buf_put_claim(&dev_info->data_buffer, &write_ptr, sample_size);
+    if (available_space < sample_size) {
+        /* This should never happen with optimized buffer size, but handle gracefully */
+        LOG_ERR("Unexpected: insufficient contiguous space in optimized buffer");
+        k_mutex_unlock(&dev_info->buffer_mutex);
+        return;
+    }
+
+    /* Zero-copy path: Write directly to ring buffer memory */
+    uint8_t *current_ptr = write_ptr;
+    
+    /* Write timestamp directly to ring buffer */
+    memcpy(current_ptr, &timestamp_ms, sizeof(timestamp_ms));
+    current_ptr += sizeof(timestamp_ms);
+
+    /* Read enabled channels directly into ring buffer memory (variable sizes) */
+    uint8_t actual_channels = 0;
     for (int i = 0; i < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; i++) {
         if (!dev_info->channels[i].enabled) {
             continue;
         }
 
-        struct sensor_data_entry entry;
-        entry.timestamp_us = timestamp;
-        entry.channel = dev_info->channels[i].channel;
+        /* Write channel ID directly to buffer */
+        enum sensor_channel channel = dev_info->channels[i].channel;
+        memcpy(current_ptr, &channel, sizeof(channel));
+        current_ptr += sizeof(channel);
 
-        ret = sensor_channel_get(device, entry.channel, &entry.value);
-        if (ret != 0) {
-            LOG_WRN("Failed to get channel %d data: %d", entry.channel, ret);
-            continue;
-        }
-
-        /* Try to put data in ring buffer */
-        size_t written = ring_buf_put(&dev_info->data_buffer, 
-                                     (uint8_t *)&entry, 
-                                     sizeof(entry));
+        /* Get actual data size for this channel */
+        struct sensor_value data_length;
+        int ret_len = sensor_attr_get(device, channel, SENSOR_ATTR_DATA_LENGTH, &data_length);
+        size_t channel_data_size;
         
-        if (written != sizeof(entry)) {
-            dev_info->buffer_overflow_count++;
-            LOG_WRN("Buffer overflow for device %s", dev_info->name);
+        if (ret_len == 0) {
+            channel_data_size = data_length.val1 * sizeof(struct sensor_value);
+        } else {
+            /* Fallback: assume single sensor_value for unknown channels */
+            channel_data_size = sizeof(struct sensor_value);
         }
+
+        /* sensor_channel_get writes directly to ring buffer memory! */
+        struct sensor_value *value_ptr = (struct sensor_value *)current_ptr;
+        ret = sensor_channel_get(device, channel, value_ptr);
+        if (ret != 0) {
+            LOG_WRN("Failed to get channel %d data: %d", channel, ret);
+            /* For fixed-size format, we still need to advance pointer to maintain alignment */
+            memset(value_ptr, 0, channel_data_size); /* Zero out failed channel */
+        }
+
+        current_ptr += channel_data_size;
+        actual_channels++;
     }
+
+    /* Commit the data to ring buffer (always full sample_size) */
+    ring_buf_put_finish(&dev_info->data_buffer, sample_size);
+    LOG_DBG("Zero-copy stored %d channels, %zu bytes for device %s", 
+            actual_channels, sample_size, dev_info->name);
 
     k_mutex_unlock(&dev_info->buffer_mutex);
 
@@ -142,7 +206,7 @@ int sensor_manager_deinit(void)
     return SENSOR_MANAGER_OK;
 }
 
-int sensor_manager_add_device(const struct device *device, const char *name, size_t buffer_size)
+int sensor_manager_add_device(const struct device *device, const char *name, bool samples_prefetched, size_t buffer_size)
 {
     if (!g_sensor_manager.initialized) {
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
@@ -189,12 +253,23 @@ int sensor_manager_add_device(const struct device *device, const char *name, siz
     dev_info->device = device;
     strncpy(dev_info->name, name, SENSOR_MANAGER_MAX_NAME_LEN - 1);
     dev_info->name[SENSOR_MANAGER_MAX_NAME_LEN - 1] = '\0';
+    dev_info->samples_prefetched = samples_prefetched;
     
-    /* Set buffer size */
+    /* Initialize new optimization fields */
+    dev_info->acquisition_active = false;
+    dev_info->sample_block_size = 0; /* Will be computed when acquisition starts */
+    
+    /* Set buffer size (estimate based on maximum sample block size) */
     if (buffer_size == 0) {
         buffer_size = SENSOR_MANAGER_DEFAULT_BUFFER_SIZE;
     }
-    dev_info->buffer_size = buffer_size * sizeof(struct sensor_data_entry);
+    /* Calculate buffer size: each sample can have up to MAX_CHANNELS channels
+     * Buffer size = num_samples * (timestamp + max_channels * (channel + value))
+     */
+    size_t max_sample_size = sizeof(uint32_t) + /* timestamp_ms */
+                            (SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE * 
+                             (sizeof(enum sensor_channel) + sizeof(struct sensor_value)));
+    dev_info->buffer_size = buffer_size * max_sample_size;
 
     /* Allocate buffer memory */
     dev_info->buffer_memory = k_malloc(dev_info->buffer_size);
@@ -279,6 +354,12 @@ int sensor_manager_enable_channel(const struct device *device, enum sensor_chann
         return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
     }
 
+    /* Check if acquisition is active - prevent channel changes during acquisition */
+    if (dev_info->acquisition_active) {
+        k_mutex_unlock(&g_sensor_manager.manager_mutex);
+        return SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE;
+    }
+
     /* Check if channel is already enabled */
     for (int i = 0; i < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; i++) {
         if (dev_info->channels[i].enabled && dev_info->channels[i].channel == channel) {
@@ -324,6 +405,12 @@ int sensor_manager_disable_channel(const struct device *device, enum sensor_chan
     if (!dev_info) {
         k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
+    }
+
+    /* Check if acquisition is active - prevent channel changes during acquisition */
+    if (dev_info->acquisition_active) {
+        k_mutex_unlock(&g_sensor_manager.manager_mutex);
+        return SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE;
     }
 
     /* Find and disable the channel */
@@ -396,6 +483,49 @@ int sensor_manager_start_acquisition(const struct device *device)
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
+    /* Pre-compute fixed sample block size based on enabled channels */
+    size_t total_size = sizeof(uint32_t); /* timestamp_ms */
+    
+    for (int i = 0; i < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; i++) {
+        if (!dev_info->channels[i].enabled) {
+            continue;
+        }
+        
+        /* Get actual data size for this channel */
+        struct sensor_value data_length;
+        int ret = sensor_attr_get(device, dev_info->channels[i].channel, 
+                                 SENSOR_ATTR_DATA_LENGTH, &data_length);
+        if (ret == 0) {
+            /* Use actual data length from sensor */
+            total_size += sizeof(enum sensor_channel) + 
+                         (data_length.val1 * sizeof(struct sensor_value));
+        } else {
+            /* Fallback: assume single sensor_value for unknown channels */
+            LOG_WRN("Could not get data length for channel %d, assuming 1 value", 
+                    dev_info->channels[i].channel);
+            total_size += sizeof(enum sensor_channel) + sizeof(struct sensor_value);
+        }
+    }
+    
+    dev_info->sample_block_size = total_size;
+
+    /* Resize ring buffer to be multiple of sample block size for optimal contiguous writes */
+    size_t optimal_buffer_size = (dev_info->buffer_size / dev_info->sample_block_size) * dev_info->sample_block_size;
+    if (optimal_buffer_size != dev_info->buffer_size) {
+        /* Reallocate buffer with optimal size */
+        k_free(dev_info->buffer_memory);
+        dev_info->buffer_size = optimal_buffer_size;
+        dev_info->buffer_memory = k_malloc(dev_info->buffer_size);
+        if (!dev_info->buffer_memory) {
+            k_mutex_unlock(&g_sensor_manager.manager_mutex);
+            LOG_ERR("Failed to reallocate optimal buffer for device %s", dev_info->name);
+            return SENSOR_MANAGER_ERROR_MEMORY_ALLOC;
+        }
+        ring_buf_init(&dev_info->data_buffer, dev_info->buffer_size, dev_info->buffer_memory);
+        LOG_DBG("Optimized buffer size to %zu bytes (%zu samples) for device %s", 
+                dev_info->buffer_size, dev_info->buffer_size / dev_info->sample_block_size, dev_info->name);
+    }
+
     /* Set up trigger with internal handler */
     int ret = sensor_trigger_set(device, &dev_info->trigger, internal_data_ready_handler);
     if (ret != 0) {
@@ -403,6 +533,9 @@ int sensor_manager_start_acquisition(const struct device *device)
         LOG_ERR("Failed to set trigger for device %s: %d", dev_info->name, ret);
         return SENSOR_MANAGER_ERROR_TRIGGER_SETUP;
     }
+
+    /* Mark acquisition as active */
+    dev_info->acquisition_active = true;
 
     k_mutex_unlock(&g_sensor_manager.manager_mutex);
 
@@ -431,6 +564,9 @@ int sensor_manager_stop_acquisition(const struct device *device)
     /* Disable trigger */
     sensor_trigger_set(device, &dev_info->trigger, NULL);
 
+    /* Mark acquisition as inactive */
+    dev_info->acquisition_active = false;
+
     k_mutex_unlock(&g_sensor_manager.manager_mutex);
 
     LOG_INF("Stopped acquisition for device %s", dev_info->name);
@@ -439,13 +575,14 @@ int sensor_manager_stop_acquisition(const struct device *device)
 
 int sensor_manager_get_latest_data(const struct device *device, 
                                   enum sensor_channel channel,
-                                  struct sensor_data_entry *data)
+                                  uint32_t *timestamp_ms,
+                                  struct sensor_value *value)
 {
     if (!g_sensor_manager.initialized) {
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
     }
 
-    if (!device || !data) {
+    if (!device || !timestamp_ms || !value) {
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
@@ -456,43 +593,104 @@ int sensor_manager_get_latest_data(const struct device *device,
 
     k_mutex_lock(&dev_info->buffer_mutex, K_FOREVER);
 
-    /* Search ring buffer for latest data of specified channel */
-    uint8_t buffer_data[sizeof(struct sensor_data_entry)];
-    size_t data_size = sizeof(struct sensor_data_entry);
-    bool found = false;
-    struct sensor_data_entry latest_entry = {0};
+    /* Check if we have any data and acquisition is active */
+    if (!dev_info->acquisition_active || dev_info->sample_block_size == 0) {
+        k_mutex_unlock(&dev_info->buffer_mutex);
+        return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
+    }
 
-    /* Read from buffer (this is a simplified approach - in practice you might want to optimize) */
-    while (ring_buf_get(&dev_info->data_buffer, buffer_data, data_size) == data_size) {
-        struct sensor_data_entry *entry = (struct sensor_data_entry *)buffer_data;
-        if (entry->channel == channel) {
-            if (!found || entry->timestamp_us > latest_entry.timestamp_us) {
-                latest_entry = *entry;
-                found = true;
+    /* Search ring buffer for latest data of specified channel */
+    bool found = false;
+    uint32_t latest_timestamp = 0;
+    struct sensor_value latest_value = {0};
+
+    /* Work backwards through ring buffer to find latest sample containing our channel */
+    uint32_t available_data = ring_buf_size_get(&dev_info->data_buffer);
+    
+    if (available_data < dev_info->sample_block_size) {
+        k_mutex_unlock(&dev_info->buffer_mutex);
+        return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND; /* No complete samples */
+    }
+
+    /* Calculate number of complete samples */
+    uint32_t num_samples = available_data / dev_info->sample_block_size;
+    
+    /* Use temporary buffer to read all samples and find the latest one with our channel */
+    uint8_t temp_buffer[available_data];
+    uint32_t peeked_bytes = ring_buf_peek(&dev_info->data_buffer, temp_buffer, available_data);
+    
+    if (peeked_bytes != available_data) {
+        k_mutex_unlock(&dev_info->buffer_mutex);
+        return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND; /* Buffer error */
+    }
+    
+    /* Parse samples starting from the most recent */
+    for (int sample_idx = num_samples - 1; sample_idx >= 0; sample_idx--) {
+        uint8_t *sample_ptr = temp_buffer + (sample_idx * dev_info->sample_block_size);
+        
+        /* Parse fixed-size sample */
+        uint8_t *ptr = sample_ptr;
+        uint32_t block_timestamp;
+        memcpy(&block_timestamp, ptr, sizeof(uint32_t));
+        ptr += sizeof(uint32_t);
+        
+        /* Search through variable-sized channels in this block */
+        for (int i = 0; i < dev_info->num_enabled_channels; i++) {
+            enum sensor_channel ch;
+            memcpy(&ch, ptr, sizeof(enum sensor_channel));
+            ptr += sizeof(enum sensor_channel);
+            
+            /* Get actual data size for this channel */
+            struct sensor_value data_length;
+            int ret_len = sensor_attr_get(device, ch, SENSOR_ATTR_DATA_LENGTH, &data_length);
+            size_t channel_data_size;
+            
+            if (ret_len == 0) {
+                channel_data_size = data_length.val1 * sizeof(struct sensor_value);
+            } else {
+                /* Fallback: assume single sensor_value for unknown channels */
+                channel_data_size = sizeof(struct sensor_value);
             }
+            
+            if (ch == channel) {
+                struct sensor_value val;
+                memcpy(&val, ptr, sizeof(struct sensor_value)); /* Only copy first value for now */
+                
+                /* This is the latest sample with our channel */
+                latest_timestamp = block_timestamp;
+                latest_value = val;
+                found = true;
+                break;
+            }
+            ptr += channel_data_size;
+        }
+        
+        if (found) {
+            break; /* Found latest data */
         }
     }
 
     k_mutex_unlock(&dev_info->buffer_mutex);
 
     if (!found) {
-        return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND; /* No data found */
+        return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND; /* Channel not found in any sample */
     }
 
-    *data = latest_entry;
+    *timestamp_ms = latest_timestamp;
+    *value = latest_value;
     return SENSOR_MANAGER_OK;
 }
 
 int sensor_manager_read_data_buffer(const struct device *device,
-                                   struct sensor_data_entry *data,
-                                   size_t max_entries,
-                                   size_t *entries_read)
+                                   struct sensor_sample_block *data,
+                                   size_t max_blocks,
+                                   size_t *blocks_read)
 {
     if (!g_sensor_manager.initialized) {
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
     }
 
-    if (!device || !data || !entries_read) {
+    if (!device || !data || !blocks_read) {
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
@@ -503,20 +701,71 @@ int sensor_manager_read_data_buffer(const struct device *device,
 
     k_mutex_lock(&dev_info->buffer_mutex, K_FOREVER);
 
-    size_t count = 0;
-    size_t data_size = sizeof(struct sensor_data_entry);
-
-    while (count < max_entries) {
-        size_t read = ring_buf_get(&dev_info->data_buffer, 
-                                  (uint8_t *)&data[count], 
-                                  data_size);
-        if (read != data_size) {
-            break; /* No more data */
-        }
-        count++;
+    /* Check if we have acquisition active and fixed sample size */
+    if (!dev_info->acquisition_active || dev_info->sample_block_size == 0) {
+        *blocks_read = 0;
+        k_mutex_unlock(&dev_info->buffer_mutex);
+        return SENSOR_MANAGER_OK;
     }
 
-    *entries_read = count;
+    uint32_t available_data = ring_buf_size_get(&dev_info->data_buffer);
+    
+    if (available_data < dev_info->sample_block_size) {
+        *blocks_read = 0;
+        k_mutex_unlock(&dev_info->buffer_mutex);
+        return SENSOR_MANAGER_OK; /* No complete samples */
+    }
+
+    /* Calculate number of complete samples available */
+    uint32_t available_samples = available_data / dev_info->sample_block_size;
+    size_t samples_to_read = MIN(available_samples, max_blocks);
+
+    /* Read samples directly from ring buffer using variable size parsing */
+    for (size_t i = 0; i < samples_to_read; i++) {
+        uint8_t sample_buffer[dev_info->sample_block_size];
+        
+        /* Get one complete sample */
+        if (ring_buf_get(&dev_info->data_buffer, sample_buffer, dev_info->sample_block_size) 
+            != dev_info->sample_block_size) {
+            break; /* Error reading sample */
+        }
+        
+        /* Parse variable-size sample */
+        uint8_t *ptr = sample_buffer;
+        
+        /* Read timestamp */
+        memcpy(&data[i].timestamp_ms, ptr, sizeof(uint32_t));
+        ptr += sizeof(uint32_t);
+        
+        /* Set fixed number of channels */
+        data[i].num_channels = dev_info->num_enabled_channels;
+        
+        /* Read all channels in order (variable sizes) */
+        for (int j = 0; j < dev_info->num_enabled_channels && j < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; j++) {
+            /* Read channel ID */
+            memcpy(&data[i].channels[j].channel, ptr, sizeof(enum sensor_channel));
+            ptr += sizeof(enum sensor_channel);
+            
+            /* Get actual data size for this channel */
+            struct sensor_value data_length;
+            int ret_len = sensor_attr_get(device, data[i].channels[j].channel, 
+                                         SENSOR_ATTR_DATA_LENGTH, &data_length);
+            size_t channel_data_size;
+            
+            if (ret_len == 0) {
+                channel_data_size = data_length.val1 * sizeof(struct sensor_value);
+            } else {
+                /* Fallback: assume single sensor_value for unknown channels */
+                channel_data_size = sizeof(struct sensor_value);
+            }
+            
+            /* Read first sensor_value for compatibility (channels with multiple values need special handling) */
+            memcpy(&data[i].channels[j].value, ptr, sizeof(struct sensor_value));
+            ptr += channel_data_size; /* Skip entire channel data */
+        }
+    }
+
+    *blocks_read = samples_to_read;
     k_mutex_unlock(&dev_info->buffer_mutex);
 
     return SENSOR_MANAGER_OK;

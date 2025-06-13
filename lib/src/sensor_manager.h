@@ -35,12 +35,34 @@ extern "C" {
 #define SENSOR_MANAGER_MAX_NAME_LEN 32
 
 /**
- * @brief Structure to hold timestamped sensor data
+ * @brief Structure to hold a single channel's data (packed for efficiency)
  */
-struct sensor_data_entry {
-    int64_t timestamp_us;           /**< Timestamp in microseconds */
-    enum sensor_channel channel;    /**< Sensor channel */
+struct __packed sensor_channel_data {
+    enum sensor_channel channel;    /**< Channel identifier */
     struct sensor_value value;      /**< Sensor value */
+};
+
+/**
+ * @brief Fixed-size sensor sample block header (32-bit timestamp)
+ * 
+ * This is followed by a fixed number of sensor_channel_data entries.
+ * The number of channels is determined when acquisition starts and cannot change.
+ * Layout in buffer: [sample_block_header][channel_data][channel_data]... (fixed count)
+ */
+struct __packed sensor_sample_block_header {
+    uint32_t timestamp_ms;          /**< Timestamp in milliseconds */
+};
+
+/**
+ * @brief Helper structure for reading complete sample blocks
+ * 
+ * This is used for API functions but not stored directly in ring buffer
+ */
+struct sensor_sample_block {
+    uint32_t timestamp_ms;          /**< Timestamp in milliseconds */
+    uint8_t num_channels;           /**< Number of channels in this sample */
+    uint8_t _padding[3];            /**< Padding for alignment */
+    struct sensor_channel_data *channels; /**< Pointer to channel data array */
 };
 
 /**
@@ -58,10 +80,13 @@ struct sensor_device_info {
     const struct device *device;                                           /**< Pointer to sensor device */
     char name[SENSOR_MANAGER_MAX_NAME_LEN];                               /**< Device name */
     bool active;                                                          /**< Device active status */
+    bool samples_prefetched;                                              /**< Some device drivers prefetch the data */
+    bool acquisition_active;                                              /**< Data acquisition in progress */
     
-    /* Channel configuration */
+    /* Channel configuration - fixed once acquisition starts */
     struct sensor_channel_config channels[SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE];
     uint8_t num_enabled_channels;                                         /**< Number of enabled channels */
+    size_t sample_block_size;                                             /**< Pre-computed fixed sample size */
     
     /* Trigger configuration */
     struct sensor_trigger trigger;                                        /**< Data ready trigger */
@@ -102,6 +127,7 @@ enum sensor_manager_error {
     SENSOR_MANAGER_ERROR_NOT_INITIALIZED,     /**< Manager not initialized */
     SENSOR_MANAGER_ERROR_MEMORY_ALLOC,        /**< Memory allocation failed */
     SENSOR_MANAGER_ERROR_TRIGGER_SETUP,       /**< Trigger setup failed */
+    SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE,  /**< Cannot change channels during acquisition */
 };
 
 /**
@@ -123,10 +149,11 @@ int sensor_manager_deinit(void);
  * 
  * @param device Pointer to the sensor device
  * @param name Human-readable name for the device
- * @param buffer_size Size of the data buffer (number of entries, 0 for default)
+ * @param samples_prefetched Whether this device pre-fetches samples
+ * @param buffer_size Size of the data buffer (number of sample blocks, 0 for default)
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
-int sensor_manager_add_device(const struct device *device, const char *name, size_t buffer_size);
+int sensor_manager_add_device(const struct device *device, const char *name, bool samples_prefetched, size_t buffer_size);
 
 /**
  * @brief Remove a sensor device from the manager
@@ -187,26 +214,28 @@ int sensor_manager_stop_acquisition(const struct device *device);
  * 
  * @param device Pointer to the sensor device
  * @param channel Channel to read from
- * @param data Pointer to store the sensor data entry
+ * @param timestamp_ms Pointer to store the timestamp in milliseconds
+ * @param value Pointer to store the sensor value
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
 int sensor_manager_get_latest_data(const struct device *device, 
                                   enum sensor_channel channel,
-                                  struct sensor_data_entry *data);
+                                  uint32_t *timestamp_ms,
+                                  struct sensor_value *value);
 
 /**
- * @brief Read multiple sensor data entries from buffer
+ * @brief Read multiple sensor sample blocks from buffer
  * 
  * @param device Pointer to the sensor device
- * @param data Array to store sensor data entries
- * @param max_entries Maximum number of entries to read
- * @param entries_read Pointer to store actual number of entries read
+ * @param data Array to store sensor sample blocks
+ * @param max_blocks Maximum number of sample blocks to read
+ * @param blocks_read Pointer to store actual number of blocks read
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
 int sensor_manager_read_data_buffer(const struct device *device,
-                                   struct sensor_data_entry *data,
-                                   size_t max_entries,
-                                   size_t *entries_read);
+                                   struct sensor_sample_block *data,
+                                   size_t max_blocks,
+                                   size_t *blocks_read);
 
 /**
  * @brief Clear the data buffer for a sensor device

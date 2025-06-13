@@ -37,27 +37,37 @@ static void sensor_data_ready_callback(const struct device *device,
  */
 static void process_device_data(const struct device *device, const char *device_name)
 {
-    struct sensor_data_entry data_buffer[10];
-    size_t entries_read;
+    struct sensor_sample_block data_buffer[10];
+    size_t blocks_read;
     
     int ret = sensor_manager_read_data_buffer(device, data_buffer,
                                             ARRAY_SIZE(data_buffer),
-                                            &entries_read);
+                                            &blocks_read);
     
-    if (ret == SENSOR_MANAGER_OK && entries_read > 0) {
-        LOG_INF("%s: Read %zu sensor data entries", device_name, entries_read);
+    if (ret == SENSOR_MANAGER_OK && blocks_read > 0) {
+        LOG_INF("%s: Read %zu sensor sample blocks", device_name, blocks_read);
         
-        /* Process the first few entries for demonstration */
-        for (size_t i = 0; i < MIN(entries_read, 3); i++) {
-            LOG_INF("  [%lld μs] Ch %d: %d.%06d",
-                   data_buffer[i].timestamp_us,
-                   data_buffer[i].channel,
-                   data_buffer[i].value.val1,
-                   data_buffer[i].value.val2);
+        /* Process the first few blocks for demonstration */
+        for (size_t i = 0; i < MIN(blocks_read, 3); i++) {
+            LOG_INF("  [%u ms] Block with %u channels:", 
+                   data_buffer[i].timestamp_ms,
+                   data_buffer[i].num_channels);
+            
+            /* Show first few channels in this block */
+            for (int j = 0; j < MIN(data_buffer[i].num_channels, 3); j++) {
+                LOG_INF("    Ch %d: %d.%06d",
+                       data_buffer[i].channels[j].channel,
+                       data_buffer[i].channels[j].value.val1,
+                       data_buffer[i].channels[j].value.val2);
+            }
+            
+            if (data_buffer[i].num_channels > 3) {
+                LOG_INF("    ... and %u more channels", data_buffer[i].num_channels - 3);
+            }
         }
         
-        if (entries_read > 3) {
-            LOG_INF("  ... and %zu more entries", entries_read - 3);
+        if (blocks_read > 3) {
+            LOG_INF("  ... and %zu more blocks", blocks_read - 3);
         }
     }
 }
@@ -112,7 +122,7 @@ static int setup_sensors(void)
             LOG_INF("ICM20948 device found and ready");
             
             /* Add device to sensor manager */
-            ret = sensor_manager_add_device(icm_dev, "ICM20948", 128);
+            ret = sensor_manager_add_device(icm_dev, "ICM20948", false, 128);
             if (ret == SENSOR_MANAGER_OK) {
                 LOG_INF("Added ICM20948 to sensor manager");
                 
@@ -162,7 +172,7 @@ static int setup_sensors(void)
     const struct device *temp_dev = device_get_binding("TEMP_0");
     if (temp_dev && device_is_ready(temp_dev)) {
         LOG_INF("Found temperature sensor");
-        ret = sensor_manager_add_device(temp_dev, "Temperature", 32);
+        ret = sensor_manager_add_device(temp_dev, "Temperature", false, 32);
         if (ret == SENSOR_MANAGER_OK) {
             sensor_manager_enable_channel(temp_dev, SENSOR_CHAN_AMBIENT_TEMP);
             sensor_manager_set_trigger_callback(temp_dev,
