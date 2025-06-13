@@ -21,6 +21,8 @@ enum icm20948_sensor_attribute {
 	SENSOR_ATTR_ICM20948_SENSOR_ENABLE = SENSOR_ATTR_PRIV_START,
 	/** Trigger self-test (write-only, any non-zero value triggers test) */
 	SENSOR_ATTR_ICM20948_SELF_TEST,
+	/** Get data length for a specific channel (read-only, returns number of sensor_value elements needed) */
+	SENSOR_ATTR_ICM20948_DATA_LENGTH,
 };
 
 /* Custom sensor channels for ICM20948 */

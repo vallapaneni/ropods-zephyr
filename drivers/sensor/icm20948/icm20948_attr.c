@@ -202,6 +202,15 @@ static int icm20948_attr_set_sensor_enable(const struct device *dev,
 		LOG_INF("Rotation vector disabled");
 	}
 
+	if (sensors_to_disable & BIT(INV_ICM20948_SENSOR_LINEAR_ACCELERATION)) {
+		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_LINEAR_ACCELERATION, 0);
+		if (ret != 0) {
+			LOG_ERR("Failed to disable linear acceleration: %d", ret);
+			return -EIO;
+		}
+		LOG_INF("Linear acceleration disabled");
+	}
+
 	/* Enable sensors that are in the new mask but not currently enabled */
 	if (sensors_to_enable & BIT(INV_ICM20948_SENSOR_ACCELEROMETER)) {
 		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_ACCELEROMETER, 1);
@@ -228,6 +237,15 @@ static int icm20948_attr_set_sensor_enable(const struct device *dev,
 			return -EIO;
 		}
 		LOG_INF("Rotation vector enabled");
+	}
+
+	if (sensors_to_enable & BIT(INV_ICM20948_SENSOR_LINEAR_ACCELERATION)) {
+		ret = inv_icm20948_enable_sensor(&data->icm_device, INV_ICM20948_SENSOR_LINEAR_ACCELERATION, 1);
+		if (ret != 0) {
+			LOG_ERR("Failed to enable linear acceleration: %d", ret);
+			return -EIO;
+		}
+		LOG_INF("Linear acceleration enabled");
 	}
 
 #ifdef CONFIG_ICM20948_TRIGGER
@@ -289,6 +307,12 @@ int icm20948_attr_set(const struct device *dev, enum sensor_channel chan,
 		ret = icm20948_attr_set_self_test(dev, chan, val);
 		break;
 
+	case SENSOR_ATTR_ICM20948_DATA_LENGTH:
+		/* Data length is a read-only attribute */
+		LOG_WRN("Data length is a read-only attribute");
+		ret = -EACCES;
+		break;
+
 	default:
 		LOG_WRN("Attribute %d not supported", attr);
 		ret = -ENOTSUP;
@@ -343,6 +367,44 @@ int icm20948_attr_get(const struct device *dev, enum sensor_channel chan,
 		/* Self-test is write-only (trigger-only) attribute */
 		LOG_WRN("Self-test is a write-only (trigger) attribute");
 		ret = -EACCES;
+		break;
+
+	case SENSOR_ATTR_ICM20948_DATA_LENGTH:
+		/* Return the number of sensor_value elements needed for the specified channel */
+		switch (chan) {
+		case SENSOR_CHAN_ACCEL_XYZ:
+		case SENSOR_CHAN_GYRO_XYZ:
+		case SENSOR_CHAN_MAGN_XYZ:
+			val->val1 = 3;  /* X, Y, Z */
+			break;
+		case SENSOR_CHAN_ACCEL_X:
+		case SENSOR_CHAN_ACCEL_Y:
+		case SENSOR_CHAN_ACCEL_Z:
+		case SENSOR_CHAN_GYRO_X:
+		case SENSOR_CHAN_GYRO_Y:
+		case SENSOR_CHAN_GYRO_Z:
+		case SENSOR_CHAN_MAGN_X:
+		case SENSOR_CHAN_MAGN_Y:
+		case SENSOR_CHAN_MAGN_Z:
+		case SENSOR_CHAN_DIE_TEMP:
+			val->val1 = 1;  /* Single value */
+			break;
+		case SENSOR_CHAN_GAME_ROTATION_VECTOR:
+		case SENSOR_CHAN_ICM20948_ROTATION_VECTOR:
+			val->val1 = 5;  /* Quaternion w,x,y,z + accuracy */
+			break;
+		case SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION:
+			val->val1 = 4;  /* X, Y, Z + accuracy */
+			break;
+		default:
+			LOG_WRN("Data length not defined for channel %d", chan);
+			ret = -ENOTSUP;
+			break;
+		}
+		if (ret == 0) {
+			val->val2 = 0;
+			LOG_DBG("Channel %d data length: %d", chan, val->val1);
+		}
 		break;
 
 	default:
