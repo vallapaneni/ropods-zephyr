@@ -10,6 +10,7 @@
 #include "icm20948_attr.h"
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/__assert.h>
+#include <string.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(icm20948, CONFIG_SENSOR_LOG_LEVEL);
@@ -340,7 +341,7 @@ static int icm20948_channel_get(const struct device *dev, enum sensor_channel ch
 		break;
 
 	case SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION:
-		/* Linear acceleration (gravity removed) - x,y,z format in m/s² */
+		/* Linear acceleration (gravity removed) - x,y,z,accuracy format in m/s² */
 		for (int i = 0; i < 3; i++) {
 			/* Convert float linear acceleration to sensor_value in m/s² */
 			val[i].val1 = (int32_t)data->linear_accel_raw[i];
@@ -348,6 +349,32 @@ static int icm20948_channel_get(const struct device *dev, enum sensor_channel ch
 		}
 		val[3].val1 = data->accel_accuracy;
 		val[3].val2 = 0;
+		break;
+
+	/* Packed channels without accuracy conversion */
+	case SENSOR_CHAN_GAME_ROTATION_VECTOR_PACKED:
+		/* 6-axis game rotation vector (quaternion: accel + gyro) - w,x,y,z format (no accuracy) */
+		/* Write quaternion float bytes directly into sensor_value fields */
+		memcpy(val, data->quat6_raw, sizeof(data->quat6_raw)); /* w */
+		break;
+
+	case SENSOR_CHAN_ROTATION_VECTOR_PACKED:
+		/* 9-axis rotation vector (quaternion: accel + gyro + mag) - w,x,y,z format (no accuracy) */
+		/* Write quaternion float bytes directly into sensor_value fields */
+		memcpy(val, data->quat9_raw, sizeof(data->quat9_raw));
+		break;
+
+	case SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION_PACKED:
+		/* Linear acceleration (gravity removed) - x,y,z format in m/s² (no accuracy) */
+		/* Write linear acceleration float bytes directly into sensor_value fields */
+		memcpy(val, data->linear_accel_raw, sizeof(data->linear_accel_raw));
+		break;
+
+	case SENSOR_CHAN_ACCURACY_FLAGS_PACKED:
+		/* All accuracy flags packed - accel_accuracy, gyro_accuracy, mag_accuracy, rv_accuracy */
+		/* Return 4 values: accel, gyro, mag accuracies (0-3 scale), rv_accuracy (0.0-1.0 scale) */
+		val->val1 = data->mag_accuracy << 16 | data->gyro_accuracy << 8 | data->accel_accuracy;
+		memcpy(&val->val2, &data->rv_accuracy, sizeof(data->rv_accuracy));
 		break;
 
 	default:

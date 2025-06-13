@@ -370,12 +370,12 @@ int icm20948_attr_get(const struct device *dev, enum sensor_channel chan,
 		break;
 
 	case SENSOR_ATTR_DATA_LENGTH:
-		/* Return the number of sensor_value elements needed for the specified channel */
+		/* Return the number of int32_t elements needed for the specified channel */
 		switch (chan) {
 		case SENSOR_CHAN_ACCEL_XYZ:
 		case SENSOR_CHAN_GYRO_XYZ:
 		case SENSOR_CHAN_MAGN_XYZ:
-			val->val1 = 3;  /* X, Y, Z */
+			val->val1 = 6;  /* 3 sensor_value * 2 int32_t each = 6 int32_t */
 			break;
 		case SENSOR_CHAN_ACCEL_X:
 		case SENSOR_CHAN_ACCEL_Y:
@@ -387,14 +387,24 @@ int icm20948_attr_get(const struct device *dev, enum sensor_channel chan,
 		case SENSOR_CHAN_MAGN_Y:
 		case SENSOR_CHAN_MAGN_Z:
 		case SENSOR_CHAN_DIE_TEMP:
-			val->val1 = 1;  /* Single value */
+			val->val1 = 2;  /* 1 sensor_value * 2 int32_t = 2 int32_t */
 			break;
 		case SENSOR_CHAN_GAME_ROTATION_VECTOR:
 		case SENSOR_CHAN_ICM20948_ROTATION_VECTOR:
-			val->val1 = 5;  /* Quaternion w,x,y,z + accuracy */
+			val->val1 = 10; /* 5 sensor_value * 2 int32_t each = 10 int32_t */
+			break;
+		case SENSOR_CHAN_GAME_ROTATION_VECTOR_PACKED:
+		case SENSOR_CHAN_ROTATION_VECTOR_PACKED:
+			val->val1 = 4;  /* 4 floats (16 bytes) = 4 int32_t */
 			break;
 		case SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION:
-			val->val1 = 4;  /* X, Y, Z + accuracy */
+			val->val1 = 8;  /* 4 sensor_value * 2 int32_t each = 8 int32_t */
+			break;
+		case SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION_PACKED:
+			val->val1 = 3;  /* 3 floats (12 bytes) = 3 int32_t */
+			break;
+		case SENSOR_CHAN_ACCURACY_FLAGS_PACKED:
+			val->val1 = 2;  /* 1 sensor_value * 2 int32_t = 2 int32_t */
 			break;
 		default:
 			LOG_WRN("Data length not defined for channel %d", chan);

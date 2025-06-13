@@ -40,6 +40,18 @@ enum icm20948_sensor_channel {
 	SENSOR_CHAN_ICM20948_GAME_ROTATION_VECTOR,
 	/** Linear acceleration (gravity removed) - x,y,z,accuracy format in m/s² */
 	SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION,
+	
+	/* Packed channels without accuracy conversion */
+	/** 6-axis game rotation vector (quaternion: accel + gyro) - w,x,y,z format (no accuracy) */
+	SENSOR_CHAN_GAME_ROTATION_VECTOR_PACKED,
+	/** 9-axis rotation vector (quaternion: accel + gyro + mag) - w,x,y,z format (no accuracy) */
+	SENSOR_CHAN_ROTATION_VECTOR_PACKED,
+	/** Linear acceleration (gravity removed) - x,y,z format in m/s² (no accuracy) */
+	SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION_PACKED,
+	
+	/* Accuracy flags channel */
+	/** All accuracy flags packed - accel_accuracy, gyro_accuracy, mag_accuracy, rv_accuracy */
+	SENSOR_CHAN_ACCURACY_FLAGS_PACKED,
 };
 
 /* Prevent macro redefinition warnings from lib/emd */
