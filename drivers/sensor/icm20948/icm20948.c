@@ -35,6 +35,8 @@ void icm20948_sensor_event_cb(void * context, enum inv_icm20948_sensor sensor, u
 			drv_data->accel_raw[1] = accel_data[1]; 
 			drv_data->accel_raw[2] = accel_data[2];
 		}
+		/* Capture accelerometer accuracy */
+		drv_data->accel_accuracy = (uint8_t)inv_icm20948_get_accel_accuracy();
 		break;
 		
 	case INV_ICM20948_SENSOR_GYROSCOPE:
@@ -44,6 +46,8 @@ void icm20948_sensor_event_cb(void * context, enum inv_icm20948_sensor sensor, u
 			drv_data->gyro_raw[1] = gyro_data[1];
 			drv_data->gyro_raw[2] = gyro_data[2];
 		}
+		/* Capture gyroscope accuracy */
+		drv_data->gyro_accuracy = (uint8_t)inv_icm20948_get_gyro_accuracy();
 		break;
 		
 	case INV_ICM20948_SENSOR_GEOMAGNETIC_FIELD:
@@ -53,6 +57,49 @@ void icm20948_sensor_event_cb(void * context, enum inv_icm20948_sensor sensor, u
 			drv_data->mag_raw[1] = mag_data[1];
 			drv_data->mag_raw[2] = mag_data[2];
 		}
+		/* Capture magnetometer accuracy */
+		drv_data->mag_accuracy = (uint8_t)inv_icm20948_get_mag_accuracy();
+		break;
+		
+	case INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR:
+		if (data) {
+			const float *quat6_data = (const float *)data;
+			/* Android quaternion format: w,x,y,z but data comes as x,y,z,w */
+			drv_data->quat6_raw[0] = quat6_data[3]; /* w */
+			drv_data->quat6_raw[1] = quat6_data[0]; /* x */
+			drv_data->quat6_raw[2] = quat6_data[1]; /* y */
+			drv_data->quat6_raw[3] = quat6_data[2]; /* z */
+		}
+		/* Game rotation vector accuracy is derived from accel and gyro */
+		drv_data->accel_accuracy = (uint8_t)inv_icm20948_get_accel_accuracy();
+		drv_data->gyro_accuracy = (uint8_t)inv_icm20948_get_gyro_accuracy();
+		break;
+		
+	case INV_ICM20948_SENSOR_ROTATION_VECTOR:
+		if (data) {
+			const float *quat9_data = (const float *)data;
+			/* Android quaternion format: w,x,y,z but data comes as x,y,z,w */
+			drv_data->quat9_raw[0] = quat9_data[3]; /* w */
+			drv_data->quat9_raw[1] = quat9_data[0]; /* x */
+			drv_data->quat9_raw[2] = quat9_data[1]; /* y */
+			drv_data->quat9_raw[3] = quat9_data[2]; /* z */
+		}
+		/* Capture rotation vector accuracy from eMD library (Q29 format) */
+		{
+			float rv_acc = inv_icm20948_get_rv_accuracy();
+			drv_data->rv_accuracy = rv_acc / (float)(1ULL << 29); /* Convert Q29 to normalized 0-1 */
+		}
+		break;
+		
+	case INV_ICM20948_SENSOR_LINEAR_ACCELERATION:
+		if (data) {
+			const float *linacc_data = (const float *)data;
+			drv_data->linear_accel_raw[0] = linacc_data[0];
+			drv_data->linear_accel_raw[1] = linacc_data[1];
+			drv_data->linear_accel_raw[2] = linacc_data[2];
+		}
+		/* Linear acceleration accuracy is derived from accelerometer accuracy */
+		drv_data->accel_accuracy = (uint8_t)inv_icm20948_get_accel_accuracy();
 		break;
 		
 	default:
@@ -264,6 +311,43 @@ static int icm20948_channel_get(const struct device *dev, enum sensor_channel ch
 	case SENSOR_CHAN_MAGN_Z:
 		val->val1 = data->mag_raw[2] / 1000;
 		val->val2 = (data->mag_raw[2] % 1000) * 1000;
+		break;
+
+	case SENSOR_CHAN_GAME_ROTATION_VECTOR:
+		/* Game rotation vector (6-axis quaternion: accel + gyro) - w,x,y,z,accuracy format */
+		/* Return 5 values: quaternion w,x,y,z + accuracy */
+		for (int i = 0; i < 4; i++) {
+			/* Convert float quaternion to sensor_value (dimensionless, range -1 to 1) */
+			val[i].val1 = (int32_t)data->quat6_raw[i];
+			val[i].val2 = (int32_t)((data->quat6_raw[i] - val[i].val1) * 1000000);
+		}
+		/* Pack accuracy as 5th value - use minimum of accel and gyro accuracy */
+		val[4].val1 = (data->accel_accuracy < data->gyro_accuracy) ? data->accel_accuracy : data->gyro_accuracy;
+		val[4].val2 = 0;
+		break;
+
+	case SENSOR_CHAN_ICM20948_ROTATION_VECTOR:
+		/* 9-axis rotation vector (quaternion: accel + gyro + mag) - w,x,y,z,accuracy format */
+		/* Return 5 values: quaternion w,x,y,z + accuracy */
+		for (int i = 0; i < 4; i++) {
+			/* Convert float quaternion to sensor_value (dimensionless, range -1 to 1) */
+			val[i].val1 = (int32_t)data->quat9_raw[i];
+			val[i].val2 = (int32_t)((data->quat9_raw[i] - val[i].val1) * 1000000);
+		}
+		/* Pack accuracy as 5th value - normalized 0-1 */
+		val[4].val1 = (int32_t)data->rv_accuracy;
+		val[4].val2 = (int32_t)((data->rv_accuracy - val[4].val1) * 1000000);
+		break;
+
+	case SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION:
+		/* Linear acceleration (gravity removed) - x,y,z format in m/s² */
+		for (int i = 0; i < 3; i++) {
+			/* Convert float linear acceleration to sensor_value in m/s² */
+			val[i].val1 = (int32_t)data->linear_accel_raw[i];
+			val[i].val2 = (int32_t)((data->linear_accel_raw[i] - val[i].val1) * 1000000);
+		}
+		val[3].val1 = data->accel_accuracy;
+		val[3].val2 = 0;
 		break;
 
 	default:

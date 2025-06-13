@@ -14,12 +14,23 @@
 /* Custom sensor attributes for ICM20948 */
 enum icm20948_sensor_attribute {
 	/** Enable/disable sensors with eMD sensor mask (0 = disable all, non-zero = enable based on mask) 
-	 *  Supported sensors: INV_ICM20948_SENSOR_ACCELEROMETER, INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR, INV_ICM20948_SENSOR_ROTATION_VECTOR
+	 *  Supported sensors: INV_ICM20948_SENSOR_ACCELEROMETER, INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR, 
+	 *                     INV_ICM20948_SENSOR_ROTATION_VECTOR, INV_ICM20948_SENSOR_LINEAR_ACCELERATION
 	 *  
 	 *  The driver efficiently manages sensor state transitions by only enabling/disabling sensors that actually changed. */
 	SENSOR_ATTR_ICM20948_SENSOR_ENABLE = SENSOR_ATTR_PRIV_START,
 	/** Trigger self-test (write-only, any non-zero value triggers test) */
 	SENSOR_ATTR_ICM20948_SELF_TEST,
+};
+
+/* Custom sensor channels for ICM20948 */
+enum icm20948_sensor_channel {
+	/** 9-axis rotation vector (quaternion: accel + gyro + mag) - w,x,y,z,accuracy format */
+	SENSOR_CHAN_ICM20948_ROTATION_VECTOR = SENSOR_CHAN_PRIV_START,
+	/** 6-axis game rotation vector (quaternion: accel + gyro) - w,x,y,z,accuracy format */
+	SENSOR_CHAN_ICM20948_GAME_ROTATION_VECTOR,
+	/** Linear acceleration (gravity removed) - x,y,z,accuracy format in m/s² */
+	SENSOR_CHAN_ICM20948_LINEAR_ACCELERATION,
 };
 
 /* Prevent macro redefinition warnings from lib/emd */
@@ -48,6 +59,7 @@ enum icm20948_sensor_attribute {
 #include "Invn/Devices/Drivers/ICM20948/Icm20948Transport.h"
 #include "Invn/Devices/Drivers/ICM20948/Icm20948Setup.h"
 #include "Invn/Devices/Drivers/ICM20948/Icm20948AuxCompassAkm.h"
+#include "Invn/Devices/Drivers/ICM20948/Icm20948MPUFifoControl.h"
 #include "Invn/EmbUtils/InvError.h"
 
 /* Restore Zephyr macros */
@@ -74,6 +86,19 @@ struct icm20948_data {
 	int16_t gyro_raw[3];
 	int16_t mag_raw[3];
 	int16_t temp_raw;
+	
+	/* Quaternion data (from eMD DMP - Q30 format converted to float) */
+	float quat6_raw[4];  /* Game rotation vector (6-axis: accel + gyro) w,x,y,z */
+	float quat9_raw[4];  /* Rotation vector (9-axis: accel + gyro + mag) w,x,y,z */
+	
+	/* Linear acceleration data (from eMD DMP - gravity removed) */
+	float linear_accel_raw[3]; /* Linear acceleration in m/s² */
+	
+	/* Accuracy data for quaternion sensors */
+	uint8_t accel_accuracy;     /* Accelerometer accuracy (0-3) */
+	uint8_t gyro_accuracy;      /* Gyroscope accuracy (0-3) */
+	uint8_t mag_accuracy;       /* Magnetometer accuracy (0-3) */
+	float rv_accuracy;          /* Rotation vector accuracy (converted from Q29) */
 	
 	/* Interrupt-driven data freshness tracking */
 	volatile bool data_ready_from_int;
