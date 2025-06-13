@@ -37,39 +37,68 @@ static void sensor_data_ready_callback(const struct device *device,
  */
 static void process_device_data(const struct device *device, const char *device_name)
 {
-    struct sensor_sample_block data_buffer[10];
+    struct sensor_sample_block *data_buffer;
     size_t blocks_read;
     
-    int ret = sensor_manager_read_data_buffer(device, data_buffer,
-                                            ARRAY_SIZE(data_buffer),
-                                            &blocks_read);
+    /* Since we now have variable-length data, we need to allocate buffer dynamically */
+    /* For simplicity, we'll allocate a large enough buffer for the sample */
+    size_t max_buffer_size = 10 * (sizeof(uint32_t) + 6 * sizeof(struct sensor_value)); /* 6 channels max */
+    data_buffer = k_malloc(max_buffer_size);
+    if (!data_buffer) {
+        LOG_ERR("Failed to allocate buffer for sensor data");
+        return;
+    }
+    
+    int ret = sensor_manager_read_data_buffer(device, data_buffer, 1, &blocks_read);
     
     if (ret == SENSOR_MANAGER_OK && blocks_read > 0) {
         LOG_INF("%s: Read %zu sensor sample blocks", device_name, blocks_read);
         
-        /* Process the first few blocks for demonstration */
-        for (size_t i = 0; i < MIN(blocks_read, 3); i++) {
-            LOG_INF("  [%u ms] Block with %u channels:", 
-                   data_buffer[i].timestamp_ms,
-                   data_buffer[i].num_channels);
-            
-            /* Show first few channels in this block */
-            for (int j = 0; j < MIN(data_buffer[i].num_channels, 3); j++) {
-                LOG_INF("    Ch %d: %d.%06d",
-                       data_buffer[i].channels[j].channel,
-                       data_buffer[i].channels[j].value.val1,
-                       data_buffer[i].channels[j].value.val2);
-            }
-            
-            if (data_buffer[i].num_channels > 3) {
-                LOG_INF("    ... and %u more channels", data_buffer[i].num_channels - 3);
-            }
-        }
+        /* Get the enabled channels to know the data format */
+        enum sensor_channel enabled_channels[SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE];
+        size_t num_enabled_channels;
+        ret = sensor_manager_get_enabled_channels(device, enabled_channels, 
+                                                 ARRAY_SIZE(enabled_channels), 
+                                                 &num_enabled_channels);
         
-        if (blocks_read > 3) {
-            LOG_INF("  ... and %zu more blocks", blocks_read - 3);
+        if (ret == SENSOR_MANAGER_OK && num_enabled_channels > 0) {
+            /* Parse the variable-length data */
+            for (size_t i = 0; i < blocks_read; i++) {
+                struct sensor_sample_block *block = (struct sensor_sample_block *)
+                    ((uint8_t *)data_buffer + i * (sizeof(uint32_t) + num_enabled_channels * sizeof(struct sensor_value)));
+                
+                LOG_INF("  [%u ms] Block with %zu channels:", 
+                       block->timestamp_ms, num_enabled_channels);
+                
+                /* Parse channel data */
+                uint8_t *data_ptr = block->data;
+                for (size_t j = 0; j < MIN(num_enabled_channels, 3); j++) {
+                    /* Get channel data size */
+                    size_t channel_data_size = sensor_manager_get_channel_data_size(device, enabled_channels[j]);
+                    struct sensor_value *values = (struct sensor_value *)data_ptr;
+                    
+                    LOG_INF("    Ch %d: %d.%06d",
+                           enabled_channels[j],
+                           values[0].val1,
+                           values[0].val2);
+                    
+                    data_ptr += channel_data_size;
+                }
+                
+                if (num_enabled_channels > 3) {
+                    LOG_INF("    ... and %zu more channels", num_enabled_channels - 3);
+                }
+            }
+            
+            if (blocks_read > 1) {
+                LOG_INF("  ... and %zu more blocks", blocks_read - 1);
+            }
+        } else {
+            LOG_WRN("Could not get enabled channels for %s", device_name);
         }
     }
+    
+    k_free(data_buffer);
 }
 
 /**

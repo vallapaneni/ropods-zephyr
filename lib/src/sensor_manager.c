@@ -38,6 +38,33 @@ static struct sensor_device_info *find_device_info(const struct device *device)
 }
 
 /**
+ * @brief Internal function to get the data size for a specific sensor channel
+ * 
+ * @param device Pointer to the sensor device
+ * @param channel The sensor channel to query
+ * @return Size in bytes of the channel data, or sizeof(struct sensor_value) as fallback
+ */
+static size_t get_sensor_channel_data_size(const struct device *device, enum sensor_channel channel)
+{
+    if (!device) {
+        return sizeof(struct sensor_value);
+    }
+
+    /* Try to get actual data size from sensor attribute */
+    struct sensor_value data_length;
+    int ret = sensor_attr_get(device, channel, SENSOR_ATTR_DATA_LENGTH, &data_length);
+    
+    if (ret == 0 && data_length.val1 > 0) {
+        /* Use actual data length from sensor (number of sensor_value elements) */
+        return data_length.val1 * sizeof(struct sensor_value);
+    }
+    
+    /* Fallback: assume single sensor_value for unknown channels */
+    LOG_DBG("Could not get data length for channel %d, assuming 1 sensor_value", channel);
+    return sizeof(struct sensor_value);
+}
+
+/**
  * @brief Internal data ready callback handler with optimized zero-copy and fixed sample size
  */
 static void internal_data_ready_handler(const struct device *device,
@@ -109,37 +136,23 @@ static void internal_data_ready_handler(const struct device *device,
     memcpy(current_ptr, &timestamp_ms, sizeof(timestamp_ms));
     current_ptr += sizeof(timestamp_ms);
 
-    /* Read enabled channels directly into ring buffer memory (variable sizes) */
+    /* Read enabled channels directly into ring buffer memory with variable sizes */
     uint8_t actual_channels = 0;
     for (int i = 0; i < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; i++) {
         if (!dev_info->channels[i].enabled) {
             continue;
         }
 
-        /* Write channel ID directly to buffer */
         enum sensor_channel channel = dev_info->channels[i].channel;
-        memcpy(current_ptr, &channel, sizeof(channel));
-        current_ptr += sizeof(channel);
-
-        /* Get actual data size for this channel */
-        struct sensor_value data_length;
-        int ret_len = sensor_attr_get(device, channel, SENSOR_ATTR_DATA_LENGTH, &data_length);
-        size_t channel_data_size;
-        
-        if (ret_len == 0) {
-            channel_data_size = data_length.val1 * sizeof(struct sensor_value);
-        } else {
-            /* Fallback: assume single sensor_value for unknown channels */
-            channel_data_size = sizeof(struct sensor_value);
-        }
+        size_t channel_data_size = get_sensor_channel_data_size(device, channel);
 
         /* sensor_channel_get writes directly to ring buffer memory! */
         struct sensor_value *value_ptr = (struct sensor_value *)current_ptr;
         ret = sensor_channel_get(device, channel, value_ptr);
         if (ret != 0) {
             LOG_WRN("Failed to get channel %d data: %d", channel, ret);
-            /* For fixed-size format, we still need to advance pointer to maintain alignment */
-            memset(value_ptr, 0, channel_data_size); /* Zero out failed channel */
+            /* Zero out failed channel to maintain structure */
+            memset(value_ptr, 0, channel_data_size);
         }
 
         current_ptr += channel_data_size;
@@ -263,12 +276,11 @@ int sensor_manager_add_device(const struct device *device, const char *name, boo
     if (buffer_size == 0) {
         buffer_size = SENSOR_MANAGER_DEFAULT_BUFFER_SIZE;
     }
-    /* Calculate buffer size: each sample can have up to MAX_CHANNELS channels
-     * Buffer size = num_samples * (timestamp + max_channels * (channel + value))
+    /* Calculate buffer size: each sample has timestamp + variable-size channel data
+     * Buffer size = num_samples * (timestamp + max_channels * max_value_size)
      */
     size_t max_sample_size = sizeof(uint32_t) + /* timestamp_ms */
-                            (SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE * 
-                             (sizeof(enum sensor_channel) + sizeof(struct sensor_value)));
+                            (SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE * sizeof(struct sensor_value));
     dev_info->buffer_size = buffer_size * max_sample_size;
 
     /* Allocate buffer memory */
@@ -483,7 +495,7 @@ int sensor_manager_start_acquisition(const struct device *device)
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
-    /* Pre-compute fixed sample block size based on enabled channels */
+    /* Pre-compute fixed sample block size based on enabled channels with variable data sizes */
     size_t total_size = sizeof(uint32_t); /* timestamp_ms */
     
     for (int i = 0; i < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; i++) {
@@ -492,19 +504,8 @@ int sensor_manager_start_acquisition(const struct device *device)
         }
         
         /* Get actual data size for this channel */
-        struct sensor_value data_length;
-        int ret = sensor_attr_get(device, dev_info->channels[i].channel, 
-                                 SENSOR_ATTR_DATA_LENGTH, &data_length);
-        if (ret == 0) {
-            /* Use actual data length from sensor */
-            total_size += sizeof(enum sensor_channel) + 
-                         (data_length.val1 * sizeof(struct sensor_value));
-        } else {
-            /* Fallback: assume single sensor_value for unknown channels */
-            LOG_WRN("Could not get data length for channel %d, assuming 1 value", 
-                    dev_info->channels[i].channel);
-            total_size += sizeof(enum sensor_channel) + sizeof(struct sensor_value);
-        }
+        size_t channel_data_size = get_sensor_channel_data_size(device, dev_info->channels[i].channel);
+        total_size += channel_data_size;
     }
     
     dev_info->sample_block_size = total_size;
@@ -628,33 +629,19 @@ int sensor_manager_get_latest_data(const struct device *device,
     for (int sample_idx = num_samples - 1; sample_idx >= 0; sample_idx--) {
         uint8_t *sample_ptr = temp_buffer + (sample_idx * dev_info->sample_block_size);
         
-        /* Parse fixed-size sample */
+        /* Parse variable-length sample format */
         uint8_t *ptr = sample_ptr;
         uint32_t block_timestamp;
         memcpy(&block_timestamp, ptr, sizeof(uint32_t));
         ptr += sizeof(uint32_t);
         
-        /* Search through variable-sized channels in this block */
+        /* Find the requested channel by its position in enabled channels array */
+        size_t channel_offset = 0;
         for (int i = 0; i < dev_info->num_enabled_channels; i++) {
-            enum sensor_channel ch;
-            memcpy(&ch, ptr, sizeof(enum sensor_channel));
-            ptr += sizeof(enum sensor_channel);
-            
-            /* Get actual data size for this channel */
-            struct sensor_value data_length;
-            int ret_len = sensor_attr_get(device, ch, SENSOR_ATTR_DATA_LENGTH, &data_length);
-            size_t channel_data_size;
-            
-            if (ret_len == 0) {
-                channel_data_size = data_length.val1 * sizeof(struct sensor_value);
-            } else {
-                /* Fallback: assume single sensor_value for unknown channels */
-                channel_data_size = sizeof(struct sensor_value);
-            }
-            
-            if (ch == channel) {
+            if (dev_info->channels[i].enabled && dev_info->channels[i].channel == channel) {
+                /* Found the channel, get its value from the current offset */
                 struct sensor_value val;
-                memcpy(&val, ptr, sizeof(struct sensor_value)); /* Only copy first value for now */
+                memcpy(&val, ptr + channel_offset, sizeof(struct sensor_value));
                 
                 /* This is the latest sample with our channel */
                 latest_timestamp = block_timestamp;
@@ -662,7 +649,11 @@ int sensor_manager_get_latest_data(const struct device *device,
                 found = true;
                 break;
             }
-            ptr += channel_data_size;
+            
+            /* Move to next channel position */
+            if (dev_info->channels[i].enabled) {
+                channel_offset += get_sensor_channel_data_size(device, dev_info->channels[i].channel);
+            }
         }
         
         if (found) {
@@ -720,7 +711,7 @@ int sensor_manager_read_data_buffer(const struct device *device,
     uint32_t available_samples = available_data / dev_info->sample_block_size;
     size_t samples_to_read = MIN(available_samples, max_blocks);
 
-    /* Read samples directly from ring buffer using variable size parsing */
+    /* Read samples directly from ring buffer using variable-length parsing */
     for (size_t i = 0; i < samples_to_read; i++) {
         uint8_t sample_buffer[dev_info->sample_block_size];
         
@@ -730,39 +721,16 @@ int sensor_manager_read_data_buffer(const struct device *device,
             break; /* Error reading sample */
         }
         
-        /* Parse variable-size sample */
+        /* Parse variable-length sample format */
         uint8_t *ptr = sample_buffer;
         
         /* Read timestamp */
         memcpy(&data[i].timestamp_ms, ptr, sizeof(uint32_t));
         ptr += sizeof(uint32_t);
         
-        /* Set fixed number of channels */
-        data[i].num_channels = dev_info->num_enabled_channels;
-        
-        /* Read all channels in order (variable sizes) */
-        for (int j = 0; j < dev_info->num_enabled_channels && j < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; j++) {
-            /* Read channel ID */
-            memcpy(&data[i].channels[j].channel, ptr, sizeof(enum sensor_channel));
-            ptr += sizeof(enum sensor_channel);
-            
-            /* Get actual data size for this channel */
-            struct sensor_value data_length;
-            int ret_len = sensor_attr_get(device, data[i].channels[j].channel, 
-                                         SENSOR_ATTR_DATA_LENGTH, &data_length);
-            size_t channel_data_size;
-            
-            if (ret_len == 0) {
-                channel_data_size = data_length.val1 * sizeof(struct sensor_value);
-            } else {
-                /* Fallback: assume single sensor_value for unknown channels */
-                channel_data_size = sizeof(struct sensor_value);
-            }
-            
-            /* Read first sensor_value for compatibility (channels with multiple values need special handling) */
-            memcpy(&data[i].channels[j].value, ptr, sizeof(struct sensor_value));
-            ptr += channel_data_size; /* Skip entire channel data */
-        }
+        /* Copy variable-length sensor data directly from buffer */
+        size_t data_size = dev_info->sample_block_size - sizeof(uint32_t);
+        memcpy(data[i].data, ptr, data_size);
     }
 
     *blocks_read = samples_to_read;
@@ -879,4 +847,9 @@ bool sensor_manager_is_device_managed(const struct device *device)
 struct sensor_manager *sensor_manager_get_instance(void)
 {
     return &g_sensor_manager;
+}
+
+size_t sensor_manager_get_channel_data_size(const struct device *device, enum sensor_channel channel)
+{
+    return get_sensor_channel_data_size(device, channel);
 }

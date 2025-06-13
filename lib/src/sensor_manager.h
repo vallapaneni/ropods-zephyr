@@ -35,34 +35,16 @@ extern "C" {
 #define SENSOR_MANAGER_MAX_NAME_LEN 32
 
 /**
- * @brief Structure to hold a single channel's data (packed for efficiency)
- */
-struct __packed sensor_channel_data {
-    enum sensor_channel channel;    /**< Channel identifier */
-    struct sensor_value value;      /**< Sensor value */
-};
-
-/**
- * @brief Fixed-size sensor sample block header (32-bit timestamp)
+ * @brief Simplified sensor sample block structure with variable-length data
  * 
- * This is followed by a fixed number of sensor_channel_data entries.
- * The number of channels is determined when acquisition starts and cannot change.
- * Layout in buffer: [sample_block_header][channel_data][channel_data]... (fixed count)
+ * Contains timestamp followed by variable-length sensor data in the order channels were enabled.
+ * The application layer knows which channels are enabled and their order.
+ * Each channel may have different data lengths (1 or more sensor_value structures).
+ * Layout in buffer: [timestamp_ms][channel_data][channel_data]... (variable lengths, fixed order)
  */
-struct __packed sensor_sample_block_header {
+struct __packed sensor_sample_block {
     uint32_t timestamp_ms;          /**< Timestamp in milliseconds */
-};
-
-/**
- * @brief Helper structure for reading complete sample blocks
- * 
- * This is used for API functions but not stored directly in ring buffer
- */
-struct sensor_sample_block {
-    uint32_t timestamp_ms;          /**< Timestamp in milliseconds */
-    uint8_t num_channels;           /**< Number of channels in this sample */
-    uint8_t _padding[3];            /**< Padding for alignment */
-    struct sensor_channel_data *channels; /**< Pointer to channel data array */
+    uint8_t data[];                 /**< Variable-length sensor data in enabled channel order */
 };
 
 /**
@@ -272,6 +254,19 @@ int sensor_manager_get_enabled_channels(const struct device *device,
                                        enum sensor_channel *channels,
                                        size_t max_channels,
                                        size_t *num_channels);
+
+/**
+ * @brief Get the data size for a specific sensor channel
+ * 
+ * This function queries the sensor device to determine how many bytes
+ * of data a specific channel provides. This is useful for applications
+ * that need to handle variable-sized sensor data.
+ * 
+ * @param device Pointer to the sensor device
+ * @param channel The sensor channel to query
+ * @return Size in bytes of the channel data, or sizeof(struct sensor_value) as fallback
+ */
+size_t sensor_manager_get_channel_data_size(const struct device *device, enum sensor_channel channel);
 
 /**
  * @brief Check if a sensor device is managed by the sensor manager
