@@ -272,26 +272,13 @@ int sensor_manager_add_device(const struct device *device, const char *name, boo
     dev_info->acquisition_active = false;
     dev_info->sample_block_size = 0; /* Will be computed when acquisition starts */
     
-    /* Set buffer size (estimate based on maximum sample block size) */
+    /* Store requested buffer size (number of samples) - buffer will be allocated in start_acquisition */
     if (buffer_size == 0) {
         buffer_size = SENSOR_MANAGER_DEFAULT_BUFFER_SIZE;
     }
-    /* Calculate buffer size: each sample has timestamp + variable-size channel data
-     * Buffer size = num_samples * (timestamp + max_channels * max_value_size)
-     */
-    size_t max_sample_size = sizeof(uint32_t) + /* timestamp_ms */
-                            (SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE * sizeof(struct sensor_value));
-    dev_info->buffer_size = buffer_size * max_sample_size;
-
-    /* Allocate buffer memory */
-    dev_info->buffer_memory = k_malloc(dev_info->buffer_size);
-    if (!dev_info->buffer_memory) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
-        return SENSOR_MANAGER_ERROR_MEMORY_ALLOC;
-    }
-
-    /* Initialize ring buffer */
-    ring_buf_init(&dev_info->data_buffer, dev_info->buffer_size, dev_info->buffer_memory);
+    dev_info->requested_buffer_samples = buffer_size;
+    dev_info->buffer_size = 0; /* Will be computed when acquisition starts */
+    dev_info->buffer_memory = NULL; /* Will be allocated when acquisition starts */
 
     /* Initialize buffer mutex */
     k_mutex_init(&dev_info->buffer_mutex);
@@ -510,22 +497,21 @@ int sensor_manager_start_acquisition(const struct device *device)
     
     dev_info->sample_block_size = total_size;
 
-    /* Resize ring buffer to be multiple of sample block size for optimal contiguous writes */
-    size_t optimal_buffer_size = (dev_info->buffer_size / dev_info->sample_block_size) * dev_info->sample_block_size;
-    if (optimal_buffer_size != dev_info->buffer_size) {
-        /* Reallocate buffer with optimal size */
-        k_free(dev_info->buffer_memory);
-        dev_info->buffer_size = optimal_buffer_size;
-        dev_info->buffer_memory = k_malloc(dev_info->buffer_size);
-        if (!dev_info->buffer_memory) {
-            k_mutex_unlock(&g_sensor_manager.manager_mutex);
-            LOG_ERR("Failed to reallocate optimal buffer for device %s", dev_info->name);
-            return SENSOR_MANAGER_ERROR_MEMORY_ALLOC;
-        }
-        ring_buf_init(&dev_info->data_buffer, dev_info->buffer_size, dev_info->buffer_memory);
-        LOG_DBG("Optimized buffer size to %zu bytes (%zu samples) for device %s", 
-                dev_info->buffer_size, dev_info->buffer_size / dev_info->sample_block_size, dev_info->name);
+    /* Calculate optimal buffer size based on actual sample block size */
+    dev_info->buffer_size = dev_info->requested_buffer_samples * dev_info->sample_block_size;
+    
+    /* Allocate buffer memory now that we know the exact size needed */
+    dev_info->buffer_memory = k_malloc(dev_info->buffer_size);
+    if (!dev_info->buffer_memory) {
+        k_mutex_unlock(&g_sensor_manager.manager_mutex);
+        LOG_ERR("Failed to allocate buffer for device %s", dev_info->name);
+        return SENSOR_MANAGER_ERROR_MEMORY_ALLOC;
     }
+    
+    /* Initialize ring buffer with optimal size */
+    ring_buf_init(&dev_info->data_buffer, dev_info->buffer_size, dev_info->buffer_memory);
+    LOG_DBG("Allocated optimized buffer: %zu bytes (%zu samples) for device %s", 
+            dev_info->buffer_size, dev_info->requested_buffer_samples, dev_info->name);
 
     /* Set up trigger with internal handler */
     int ret = sensor_trigger_set(device, &dev_info->trigger, internal_data_ready_handler);
@@ -567,6 +553,13 @@ int sensor_manager_stop_acquisition(const struct device *device)
 
     /* Mark acquisition as inactive */
     dev_info->acquisition_active = false;
+    
+    /* Free buffer memory since acquisition is stopped */
+    if (dev_info->buffer_memory) {
+        k_free(dev_info->buffer_memory);
+        dev_info->buffer_memory = NULL;
+        dev_info->buffer_size = 0;
+    }
 
     k_mutex_unlock(&g_sensor_manager.manager_mutex);
 

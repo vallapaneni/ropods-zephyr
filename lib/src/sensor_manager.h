@@ -78,6 +78,7 @@ struct sensor_device_info {
     struct ring_buf data_buffer;                                          /**< Ring buffer for sensor data */
     uint8_t *buffer_memory;                                               /**< Memory for ring buffer */
     size_t buffer_size;                                                   /**< Buffer size in bytes */
+    size_t requested_buffer_samples;                                      /**< Requested number of samples to buffer */
     struct k_mutex buffer_mutex;                                          /**< Mutex for buffer access */
     
     /* Statistics */
