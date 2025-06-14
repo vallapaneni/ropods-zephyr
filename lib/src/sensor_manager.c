@@ -65,6 +65,125 @@ static size_t get_sensor_channel_data_size(const struct device *device, enum sen
 }
 
 /**
+ * @brief Allocate memory from the static memory pool
+ * 
+ * @param size Size in bytes to allocate
+ * @param device_index Index of the device requesting memory
+ * @return Pointer to allocated memory, or NULL if allocation failed
+ */
+static uint8_t *sensor_manager_pool_alloc(size_t size, uint8_t device_index)
+{
+    if (size == 0 || device_index >= SENSOR_MANAGER_MAX_DEVICES) {
+        return NULL;
+    }
+
+    /* Align size to memory alignment boundary */
+    size_t aligned_size = (size + SENSOR_MANAGER_MEMORY_ALIGN - 1) & ~(SENSOR_MANAGER_MEMORY_ALIGN - 1);
+    
+    /* Check if size exceeds per-device limit */
+    if (aligned_size > SENSOR_MANAGER_MAX_BUFFER_SIZE_PER_DEVICE) {
+        LOG_ERR("Requested size %zu exceeds per-device limit %d", 
+                aligned_size, SENSOR_MANAGER_MAX_BUFFER_SIZE_PER_DEVICE);
+        return NULL;
+    }
+
+    k_mutex_lock(&g_sensor_manager.memory_mutex, K_FOREVER);
+
+    /* Check if we have enough space in the pool */
+    if (g_sensor_manager.memory_pool_used + aligned_size > SENSOR_MANAGER_MEMORY_POOL_SIZE) {
+        k_mutex_unlock(&g_sensor_manager.memory_mutex);
+        LOG_ERR("Memory pool exhausted: used=%zu, requested=%zu, total=%d", 
+                g_sensor_manager.memory_pool_used, aligned_size, SENSOR_MANAGER_MEMORY_POOL_SIZE);
+        return NULL;
+    }
+
+    /* Find available memory block descriptor */
+    struct sensor_manager_memory_block *block = NULL;
+    for (int i = 0; i < SENSOR_MANAGER_MAX_DEVICES; i++) {
+        if (!g_sensor_manager.memory_blocks[i].allocated) {
+            block = &g_sensor_manager.memory_blocks[i];
+            break;
+        }
+    }
+
+    if (!block) {
+        k_mutex_unlock(&g_sensor_manager.memory_mutex);
+        LOG_ERR("No available memory block descriptors");
+        return NULL;
+    }
+
+    /* Allocate memory from the pool */
+    uint8_t *ptr = g_sensor_manager.memory_pool + g_sensor_manager.memory_pool_used;
+    
+    /* Update block descriptor */
+    block->ptr = ptr;
+    block->size = aligned_size;
+    block->allocated = true;
+    block->device_index = device_index;
+    
+    /* Update pool usage */
+    g_sensor_manager.memory_pool_used += aligned_size;
+
+    k_mutex_unlock(&g_sensor_manager.memory_mutex);
+
+    LOG_DBG("Allocated %zu bytes (aligned from %zu) for device %d at %p, pool usage: %zu/%d", 
+            aligned_size, size, device_index, ptr, g_sensor_manager.memory_pool_used, SENSOR_MANAGER_MEMORY_POOL_SIZE);
+
+    return ptr;
+}
+
+/**
+ * @brief Free memory back to the static memory pool
+ * 
+ * @param ptr Pointer to memory to free
+ * @param device_index Index of the device freeing memory
+ */
+static void sensor_manager_pool_free(uint8_t *ptr, uint8_t device_index)
+{
+    if (!ptr || device_index >= SENSOR_MANAGER_MAX_DEVICES) {
+        return;
+    }
+
+    k_mutex_lock(&g_sensor_manager.memory_mutex, K_FOREVER);
+
+    /* Find the memory block descriptor */
+    struct sensor_manager_memory_block *block = NULL;
+    for (int i = 0; i < SENSOR_MANAGER_MAX_DEVICES; i++) {
+        if (g_sensor_manager.memory_blocks[i].allocated && 
+            g_sensor_manager.memory_blocks[i].ptr == ptr &&
+            g_sensor_manager.memory_blocks[i].device_index == device_index) {
+            block = &g_sensor_manager.memory_blocks[i];
+            break;
+        }
+    }
+
+    if (!block) {
+        k_mutex_unlock(&g_sensor_manager.memory_mutex);
+        LOG_WRN("Memory block not found for ptr %p, device %d", ptr, device_index);
+        return;
+    }
+
+    LOG_DBG("Freeing %zu bytes for device %d at %p", block->size, device_index, ptr);
+
+    /* If this is the last allocated block, we can actually reclaim the space */
+    if (ptr + block->size == g_sensor_manager.memory_pool + g_sensor_manager.memory_pool_used) {
+        g_sensor_manager.memory_pool_used -= block->size;
+        LOG_DBG("Reclaimed memory, pool usage now: %zu/%d", 
+                g_sensor_manager.memory_pool_used, SENSOR_MANAGER_MEMORY_POOL_SIZE);
+    } else {
+        LOG_DBG("Memory not at end of pool, cannot reclaim (fragmentation)");
+    }
+
+    /* Mark block as free */
+    block->ptr = NULL;
+    block->size = 0;
+    block->allocated = false;
+    block->device_index = 0;
+
+    k_mutex_unlock(&g_sensor_manager.memory_mutex);
+}
+
+/**
  * @brief Internal data ready callback handler with optimized zero-copy and fixed sample size
  */
 static void internal_data_ready_handler(const struct device *device,
@@ -181,12 +300,22 @@ int sensor_manager_init(void)
     /* Initialize manager mutex */
     k_mutex_init(&g_sensor_manager.manager_mutex);
 
+    /* Initialize memory pool mutex */
+    k_mutex_init(&g_sensor_manager.memory_mutex);
+
     /* Initialize device structures */
     memset(g_sensor_manager.devices, 0, sizeof(g_sensor_manager.devices));
     g_sensor_manager.num_devices = 0;
+
+    /* Initialize memory pool */
+    memset(g_sensor_manager.memory_pool, 0, sizeof(g_sensor_manager.memory_pool));
+    memset(g_sensor_manager.memory_blocks, 0, sizeof(g_sensor_manager.memory_blocks));
+    g_sensor_manager.memory_pool_used = 0;
+
     g_sensor_manager.initialized = true;
 
-    LOG_INF("Sensor manager initialized");
+    LOG_INF("Sensor manager initialized with %dKB static memory pool", 
+            SENSOR_MANAGER_MEMORY_POOL_SIZE / 1024);
     return SENSOR_MANAGER_OK;
 }
 
@@ -204,7 +333,8 @@ int sensor_manager_deinit(void)
         if (dev_info->active) {
             sensor_manager_stop_acquisition(dev_info->device);
             if (dev_info->buffer_memory) {
-                k_free(dev_info->buffer_memory);
+                uint8_t device_index = i;
+                sensor_manager_pool_free(dev_info->buffer_memory, device_index);
             }
         }
     }
@@ -322,7 +452,8 @@ int sensor_manager_remove_device(const struct device *device)
 
     /* Free buffer memory */
     if (dev_info->buffer_memory) {
-        k_free(dev_info->buffer_memory);
+        uint8_t device_index = dev_info - g_sensor_manager.devices;
+        sensor_manager_pool_free(dev_info->buffer_memory, device_index);
     }
 
     /* Clear device info */
@@ -500,17 +631,21 @@ int sensor_manager_start_acquisition(const struct device *device)
     /* Calculate optimal buffer size based on actual sample block size */
     dev_info->buffer_size = dev_info->requested_buffer_samples * dev_info->sample_block_size;
     
-    /* Allocate buffer memory now that we know the exact size needed */
-    dev_info->buffer_memory = k_malloc(dev_info->buffer_size);
+    /* Calculate device index for memory pool allocation */
+    uint8_t device_index = dev_info - g_sensor_manager.devices;
+    
+    /* Allocate buffer memory from static memory pool */
+    dev_info->buffer_memory = sensor_manager_pool_alloc(dev_info->buffer_size, device_index);
     if (!dev_info->buffer_memory) {
         k_mutex_unlock(&g_sensor_manager.manager_mutex);
-        LOG_ERR("Failed to allocate buffer for device %s", dev_info->name);
-        return SENSOR_MANAGER_ERROR_MEMORY_ALLOC;
+        LOG_ERR("Failed to allocate %zu bytes from memory pool for device %s", 
+                dev_info->buffer_size, dev_info->name);
+        return SENSOR_MANAGER_ERROR_MEMORY_POOL_FULL;
     }
     
     /* Initialize ring buffer with optimal size */
     ring_buf_init(&dev_info->data_buffer, dev_info->buffer_size, dev_info->buffer_memory);
-    LOG_DBG("Allocated optimized buffer: %zu bytes (%zu samples) for device %s", 
+    LOG_DBG("Allocated optimized buffer: %zu bytes (%zu samples) for device %s from memory pool", 
             dev_info->buffer_size, dev_info->requested_buffer_samples, dev_info->name);
 
     /* Set up trigger with internal handler */
@@ -556,7 +691,8 @@ int sensor_manager_stop_acquisition(const struct device *device)
     
     /* Free buffer memory since acquisition is stopped */
     if (dev_info->buffer_memory) {
-        k_free(dev_info->buffer_memory);
+        uint8_t device_index = dev_info - g_sensor_manager.devices;
+        sensor_manager_pool_free(dev_info->buffer_memory, device_index);
         dev_info->buffer_memory = NULL;
         dev_info->buffer_size = 0;
     }

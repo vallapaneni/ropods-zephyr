@@ -34,6 +34,16 @@ extern "C" {
 /** Maximum length for sensor device name */
 #define SENSOR_MANAGER_MAX_NAME_LEN 32
 
+/* Static memory pool configuration */
+/** Size of static memory pool for all ring buffers (in bytes) */
+#define SENSOR_MANAGER_MEMORY_POOL_SIZE (32 * 1024)  /* 32KB total pool */
+
+/** Maximum buffer size per device (in bytes) */
+#define SENSOR_MANAGER_MAX_BUFFER_SIZE_PER_DEVICE (8 * 1024)  /* 8KB per device max */
+
+/** Memory pool block alignment (must be power of 2) */
+#define SENSOR_MANAGER_MEMORY_ALIGN 4
+
 /**
  * @brief Simplified sensor sample block structure with variable-length data
  * 
@@ -87,6 +97,16 @@ struct sensor_device_info {
 };
 
 /**
+ * @brief Memory block descriptor for static memory pool
+ */
+struct sensor_manager_memory_block {
+    uint8_t *ptr;                    /**< Pointer to memory block */
+    size_t size;                     /**< Size of the block */
+    bool allocated;                  /**< Whether block is allocated */
+    uint8_t device_index;            /**< Index of device using this block (if allocated) */
+};
+
+/**
  * @brief Sensor manager context structure
  */
 struct sensor_manager {
@@ -94,6 +114,12 @@ struct sensor_manager {
     uint8_t num_devices;                                                  /**< Number of registered devices */
     struct k_mutex manager_mutex;                                         /**< Mutex for manager operations */
     bool initialized;                                                     /**< Initialization status */
+    
+    /* Static memory pool for ring buffers */
+    uint8_t memory_pool[SENSOR_MANAGER_MEMORY_POOL_SIZE];                 /**< Static memory pool */
+    struct sensor_manager_memory_block memory_blocks[SENSOR_MANAGER_MAX_DEVICES]; /**< Memory block descriptors */
+    size_t memory_pool_used;                                              /**< Bytes used from memory pool */
+    struct k_mutex memory_mutex;                                          /**< Mutex for memory pool operations */
 };
 
 /**
@@ -109,6 +135,7 @@ enum sensor_manager_error {
     SENSOR_MANAGER_ERROR_BUFFER_FULL,         /**< Buffer is full */
     SENSOR_MANAGER_ERROR_NOT_INITIALIZED,     /**< Manager not initialized */
     SENSOR_MANAGER_ERROR_MEMORY_ALLOC,        /**< Memory allocation failed */
+    SENSOR_MANAGER_ERROR_MEMORY_POOL_FULL,    /**< Static memory pool exhausted */
     SENSOR_MANAGER_ERROR_TRIGGER_SETUP,       /**< Trigger setup failed */
     SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE,  /**< Cannot change channels during acquisition */
 };
