@@ -208,9 +208,28 @@ static void internal_data_ready_handler(const struct device *device,
 
     k_mutex_unlock(&dev_info->buffer_mutex);
 
-    /* Call user callback if set */
-    if (dev_info->callback) {
-        dev_info->callback(device, trigger);
+    /* Check and handle sample count trigger AFTER data is collected */
+    if (dev_info->sample_trigger_enabled) {
+        dev_info->samples_collected_since_trigger++;
+        
+        if (dev_info->samples_collected_since_trigger >= dev_info->sample_count_threshold) {
+            /* Trigger callback if set - now the sample is available in the buffer */
+            if (dev_info->callback) {
+                dev_info->callback(device, trigger);
+            }
+            
+            /* Reset counter or disable trigger based on repeat setting */
+            if (dev_info->sample_trigger_repeat) {
+                dev_info->samples_collected_since_trigger = 0;
+            } else {
+                dev_info->sample_trigger_enabled = false;
+            }
+        }
+    } else {
+        /* If no sample trigger, call callback on every sample (original behavior) */
+        if (dev_info->callback) {
+            dev_info->callback(device, trigger);
+        }
     }
 }
 
@@ -436,7 +455,9 @@ int sensor_manager_disable_channel(const struct device *device, enum sensor_chan
 
 int sensor_manager_set_trigger_callback(const struct device *device, 
                                        enum sensor_trigger_type trigger_type,
-                                       sensor_trigger_handler_t callback)
+                                       sensor_trigger_handler_t callback,
+                                       uint32_t sample_count_threshold,
+                                       bool repeat)
 {
     if (!g_sensor_manager.initialized) {
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
@@ -455,6 +476,19 @@ int sensor_manager_set_trigger_callback(const struct device *device,
     dev_info->trigger.type = trigger_type;
     dev_info->trigger.chan = SENSOR_CHAN_ALL;
     dev_info->callback = callback;
+
+    /* Set up sample count trigger */
+    if (sample_count_threshold > 0) {
+        dev_info->sample_count_threshold = sample_count_threshold;
+        dev_info->sample_trigger_enabled = true;
+        dev_info->sample_trigger_repeat = repeat;
+        dev_info->samples_collected_since_trigger = 0;
+        LOG_INF("Set sample trigger for device %s: threshold=%u, repeat=%s", 
+                dev_info->name, sample_count_threshold, repeat ? "true" : "false");
+    } else {
+        dev_info->sample_trigger_enabled = false;
+        LOG_DBG("Disabled sample trigger for device %s", dev_info->name);
+    }
 
     LOG_DBG("Set trigger callback for device %s", dev_info->name);
     return SENSOR_MANAGER_OK;

@@ -16,20 +16,39 @@
 LOG_MODULE_REGISTER(sensor_manager_sample, LOG_LEVEL_INF);
 
 /* Sample configuration */
-#define DATA_PROCESSING_INTERVAL_MS 1000
-#define STATS_REPORTING_INTERVAL_MS 5000
+#define MAX_CALLBACKS 10
 
 /* Application state */
-static bool app_running = true;
+static K_SEM_DEFINE(app_exit_sem, 0, 1);
+static uint32_t total_callback_count = 0;
+
+/* Forward declarations */
+static void process_device_data(const struct device *device, const char *device_name);
 
 /**
- * @brief User callback for data ready events
+ * @brief User callback for data ready events with sample counting
  */
 static void sensor_data_ready_callback(const struct device *device,
                                       const struct sensor_trigger *trigger)
 {
-    LOG_DBG("Data ready from device: %s", device->name);
-    /* Keep callback minimal - actual processing happens in main loop */
+    total_callback_count++;
+    
+    LOG_INF("Sample trigger fired for device: %s (callback #%u/%u)", 
+            device->name, total_callback_count, MAX_CALLBACKS);
+    
+    /* Process sensor data immediately in callback */
+    process_device_data(device, device->name);
+    
+    /* Stop sensors and signal application exit after MAX_CALLBACKS */
+    if (total_callback_count >= MAX_CALLBACKS) {
+        LOG_INF("Reached maximum callbacks (%u), stopping sensors...", MAX_CALLBACKS);
+        
+        /* Stop acquisition for all devices */
+        sensor_manager_stop_acquisition_all();
+        
+        /* Signal main thread to exit */
+        k_sem_give(&app_exit_sem);
+    }
 }
 
 /**
@@ -173,12 +192,14 @@ static int setup_sensors(void)
                 sensor_manager_enable_channel(icm_dev, SENSOR_CHAN_GYRO_Z);
                 LOG_INF("Enabled gyroscope channels");
                 
-                /* Set up data ready callback */
+                /* Set up data ready callback with sample counting trigger */
                 ret = sensor_manager_set_trigger_callback(icm_dev,
                                                          SENSOR_TRIG_DATA_READY,
-                                                         sensor_data_ready_callback);
+                                                         sensor_data_ready_callback,
+                                                         10,  /* Trigger every 10 samples */
+                                                         true); /* Repeat trigger */
                 if (ret == SENSOR_MANAGER_OK) {
-                    LOG_INF("Set up data ready callback");
+                    LOG_INF("Set up data ready callback (trigger every 10 samples)");
                 } else {
                     LOG_WRN("Failed to set callback: %d", ret);
                 }
@@ -204,8 +225,10 @@ static int setup_sensors(void)
             sensor_manager_enable_channel(temp_dev, SENSOR_CHAN_AMBIENT_TEMP);
             sensor_manager_set_trigger_callback(temp_dev,
                                                SENSOR_TRIG_DATA_READY,
-                                               sensor_data_ready_callback);
-            LOG_INF("Temperature sensor configured");
+                                               sensor_data_ready_callback,
+                                               5,    /* Trigger every 5 samples */
+                                               true); /* Repeat trigger */
+            LOG_INF("Temperature sensor configured (trigger every 5 samples)");
         }
     }
     
@@ -261,48 +284,14 @@ int main(void)
     }
     LOG_INF("Data acquisition started successfully");
     
-    /* Application main loop */
-    int64_t last_data_process = 0;
-    int64_t last_stats_report = 0;
-    uint32_t loop_count = 0;
+    /* Application main - wait for callbacks to complete */
+    LOG_INF("Waiting for sensor callbacks to complete...");
+    printk("Application will exit after %u sensor callbacks\n\n", MAX_CALLBACKS);
     
-    LOG_INF("Entering main application loop...");
-    printk("Press Ctrl+C to exit\n\n");
+    /* Wait for the callback to signal completion */
+    k_sem_take(&app_exit_sem, K_FOREVER);
     
-    while (app_running) {
-        int64_t current_time = k_uptime_get();
-        
-        /* Process sensor data periodically */
-        if (current_time - last_data_process >= DATA_PROCESSING_INTERVAL_MS) {
-            const struct device *icm_dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(icm20948));
-            if (icm_dev && sensor_manager_is_device_managed(icm_dev)) {
-                process_device_data(icm_dev, "ICM20948");
-            }
-            
-            last_data_process = current_time;
-        }
-        
-        /* Report statistics periodically */
-        if (current_time - last_stats_report >= STATS_REPORTING_INTERVAL_MS) {
-            report_statistics();
-            last_stats_report = current_time;
-        }
-        
-        /* Periodic status update */
-        loop_count++;
-        if (loop_count % 100 == 0) {
-            LOG_DBG("Main loop iteration: %u", loop_count);
-        }
-        
-        /* Sleep to avoid busy waiting */
-        k_sleep(K_MSEC(100));
-        
-        /* Run for demonstration (exit after ~30 seconds) */
-        if (current_time > 30000) {
-            LOG_INF("Demo completed after 30 seconds");
-            app_running = false;
-        }
-    }
+    LOG_INF("All callbacks completed, exiting application");
     
     /* Cleanup and exit */
     cleanup_sensors();

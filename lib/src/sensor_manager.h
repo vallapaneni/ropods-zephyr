@@ -94,6 +94,12 @@ struct sensor_device_info {
     /* Statistics */
     uint32_t data_ready_count;                                            /**< Count of data ready events */
     uint32_t buffer_overflow_count;                                       /**< Count of buffer overflows */
+    
+    /* Sample count trigger mechanism */
+    uint32_t sample_count_threshold;                                      /**< Trigger after this many samples */
+    uint32_t samples_collected_since_trigger;                             /**< Current sample count */
+    bool sample_trigger_enabled;                                          /**< Sample count trigger enabled */
+    bool sample_trigger_repeat;                                           /**< Repeat trigger every N samples */
 };
 
 /**
@@ -181,16 +187,24 @@ int sensor_manager_enable_channel(const struct device *device, enum sensor_chann
 int sensor_manager_disable_channel(const struct device *device, enum sensor_channel channel);
 
 /**
- * @brief Set data ready trigger callback for a sensor device
+ * @brief Set data ready trigger callback for a sensor device with sample count trigger
+ * 
+ * This function sets up both the hardware data ready trigger and an optional
+ * sample count trigger. The callback will be called after the specified number
+ * of samples have been collected.
  * 
  * @param device Pointer to the sensor device
  * @param trigger_type Type of trigger (e.g., SENSOR_TRIG_DATA_READY)
  * @param callback Callback function to be called on trigger
+ * @param sample_count_threshold Number of samples to collect before triggering callback (0 = trigger on every sample)
+ * @param repeat If true, trigger repeatedly every N samples; if false, trigger only once
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
 int sensor_manager_set_trigger_callback(const struct device *device, 
                                        enum sensor_trigger_type trigger_type,
-                                       sensor_trigger_handler_t callback);
+                                       sensor_trigger_handler_t callback,
+                                       uint32_t sample_count_threshold,
+                                       bool repeat);
 
 /**
  * @brief Start data acquisition for all managed sensor devices
