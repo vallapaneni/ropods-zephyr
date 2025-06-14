@@ -65,122 +65,45 @@ static size_t get_sensor_channel_data_size(const struct device *device, enum sen
 }
 
 /**
- * @brief Allocate memory from the static memory pool
+ * @brief Allocate memory from the static memory pool for all devices
  * 
- * @param size Size in bytes to allocate
- * @param device_index Index of the device requesting memory
+ * @param size Total size in bytes to allocate
  * @return Pointer to allocated memory, or NULL if allocation failed
  */
-static uint8_t *sensor_manager_pool_alloc(size_t size, uint8_t device_index)
+static uint8_t *sensor_manager_pool_alloc_all(size_t size)
 {
-    if (size == 0 || device_index >= SENSOR_MANAGER_MAX_DEVICES) {
+    if (size == 0 || size > SENSOR_MANAGER_MEMORY_POOL_SIZE) {
+        LOG_ERR("Invalid allocation size: %zu (max: %d)", size, SENSOR_MANAGER_MEMORY_POOL_SIZE);
+        return NULL;
+    }
+
+    /* Check if memory is already allocated */
+    if (g_sensor_manager.allocated_memory != NULL) {
+        LOG_ERR("Memory already allocated, call stop_acquisition_all first");
         return NULL;
     }
 
     /* Align size to memory alignment boundary */
     size_t aligned_size = (size + SENSOR_MANAGER_MEMORY_ALIGN - 1) & ~(SENSOR_MANAGER_MEMORY_ALIGN - 1);
     
-    /* Check if size exceeds per-device limit */
-    if (aligned_size > SENSOR_MANAGER_MAX_BUFFER_SIZE_PER_DEVICE) {
-        LOG_ERR("Requested size %zu exceeds per-device limit %d", 
-                aligned_size, SENSOR_MANAGER_MAX_BUFFER_SIZE_PER_DEVICE);
-        return NULL;
-    }
+    /* Allocate from beginning of pool */
+    g_sensor_manager.allocated_memory = g_sensor_manager.memory_pool;
+    g_sensor_manager.allocated_size = aligned_size;
 
-    k_mutex_lock(&g_sensor_manager.memory_mutex, K_FOREVER);
-
-    /* Check if we have enough space in the pool */
-    if (g_sensor_manager.memory_pool_used + aligned_size > SENSOR_MANAGER_MEMORY_POOL_SIZE) {
-        k_mutex_unlock(&g_sensor_manager.memory_mutex);
-        LOG_ERR("Memory pool exhausted: used=%zu, requested=%zu, total=%d", 
-                g_sensor_manager.memory_pool_used, aligned_size, SENSOR_MANAGER_MEMORY_POOL_SIZE);
-        return NULL;
-    }
-
-    /* Find available memory block descriptor */
-    struct sensor_manager_memory_block *block = NULL;
-    for (int i = 0; i < SENSOR_MANAGER_MAX_DEVICES; i++) {
-        if (!g_sensor_manager.memory_blocks[i].allocated) {
-            block = &g_sensor_manager.memory_blocks[i];
-            break;
-        }
-    }
-
-    if (!block) {
-        k_mutex_unlock(&g_sensor_manager.memory_mutex);
-        LOG_ERR("No available memory block descriptors");
-        return NULL;
-    }
-
-    /* Allocate memory from the pool */
-    uint8_t *ptr = g_sensor_manager.memory_pool + g_sensor_manager.memory_pool_used;
-    
-    /* Update block descriptor */
-    block->ptr = ptr;
-    block->size = aligned_size;
-    block->allocated = true;
-    block->device_index = device_index;
-    
-    /* Update pool usage */
-    g_sensor_manager.memory_pool_used += aligned_size;
-
-    k_mutex_unlock(&g_sensor_manager.memory_mutex);
-
-    LOG_DBG("Allocated %zu bytes (aligned from %zu) for device %d at %p, pool usage: %zu/%d", 
-            aligned_size, size, device_index, ptr, g_sensor_manager.memory_pool_used, SENSOR_MANAGER_MEMORY_POOL_SIZE);
-
-    return ptr;
+    LOG_DBG("Allocated %zu bytes (aligned from %zu) from memory pool", aligned_size, size);
+    return g_sensor_manager.allocated_memory;
 }
 
 /**
- * @brief Free memory back to the static memory pool
- * 
- * @param ptr Pointer to memory to free
- * @param device_index Index of the device freeing memory
+ * @brief Free all memory back to the static memory pool
  */
-static void sensor_manager_pool_free(uint8_t *ptr, uint8_t device_index)
+static void sensor_manager_pool_free_all(void)
 {
-    if (!ptr || device_index >= SENSOR_MANAGER_MAX_DEVICES) {
-        return;
+    if (g_sensor_manager.allocated_memory != NULL) {
+        LOG_DBG("Freed %zu bytes back to memory pool", g_sensor_manager.allocated_size);
+        g_sensor_manager.allocated_memory = NULL;
+        g_sensor_manager.allocated_size = 0;
     }
-
-    k_mutex_lock(&g_sensor_manager.memory_mutex, K_FOREVER);
-
-    /* Find the memory block descriptor */
-    struct sensor_manager_memory_block *block = NULL;
-    for (int i = 0; i < SENSOR_MANAGER_MAX_DEVICES; i++) {
-        if (g_sensor_manager.memory_blocks[i].allocated && 
-            g_sensor_manager.memory_blocks[i].ptr == ptr &&
-            g_sensor_manager.memory_blocks[i].device_index == device_index) {
-            block = &g_sensor_manager.memory_blocks[i];
-            break;
-        }
-    }
-
-    if (!block) {
-        k_mutex_unlock(&g_sensor_manager.memory_mutex);
-        LOG_WRN("Memory block not found for ptr %p, device %d", ptr, device_index);
-        return;
-    }
-
-    LOG_DBG("Freeing %zu bytes for device %d at %p", block->size, device_index, ptr);
-
-    /* If this is the last allocated block, we can actually reclaim the space */
-    if (ptr + block->size == g_sensor_manager.memory_pool + g_sensor_manager.memory_pool_used) {
-        g_sensor_manager.memory_pool_used -= block->size;
-        LOG_DBG("Reclaimed memory, pool usage now: %zu/%d", 
-                g_sensor_manager.memory_pool_used, SENSOR_MANAGER_MEMORY_POOL_SIZE);
-    } else {
-        LOG_DBG("Memory not at end of pool, cannot reclaim (fragmentation)");
-    }
-
-    /* Mark block as free */
-    block->ptr = NULL;
-    block->size = 0;
-    block->allocated = false;
-    block->device_index = 0;
-
-    k_mutex_unlock(&g_sensor_manager.memory_mutex);
 }
 
 /**
@@ -297,20 +220,15 @@ int sensor_manager_init(void)
         return SENSOR_MANAGER_OK;
     }
 
-    /* Initialize manager mutex */
-    k_mutex_init(&g_sensor_manager.manager_mutex);
-
-    /* Initialize memory pool mutex */
-    k_mutex_init(&g_sensor_manager.memory_mutex);
-
     /* Initialize device structures */
     memset(g_sensor_manager.devices, 0, sizeof(g_sensor_manager.devices));
     g_sensor_manager.num_devices = 0;
+    g_sensor_manager.acquisition_active = false;
 
     /* Initialize memory pool */
     memset(g_sensor_manager.memory_pool, 0, sizeof(g_sensor_manager.memory_pool));
-    memset(g_sensor_manager.memory_blocks, 0, sizeof(g_sensor_manager.memory_blocks));
-    g_sensor_manager.memory_pool_used = 0;
+    g_sensor_manager.allocated_memory = NULL;
+    g_sensor_manager.allocated_size = 0;
 
     g_sensor_manager.initialized = true;
 
@@ -325,25 +243,12 @@ int sensor_manager_deinit(void)
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
-
     /* Stop and cleanup all devices */
-    for (int i = 0; i < g_sensor_manager.num_devices; i++) {
-        struct sensor_device_info *dev_info = &g_sensor_manager.devices[i];
-        if (dev_info->active) {
-            sensor_manager_stop_acquisition(dev_info->device);
-            if (dev_info->buffer_memory) {
-                uint8_t device_index = i;
-                sensor_manager_pool_free(dev_info->buffer_memory, device_index);
-            }
-        }
-    }
-
+    sensor_manager_stop_acquisition_all();
+    
     memset(g_sensor_manager.devices, 0, sizeof(g_sensor_manager.devices));
     g_sensor_manager.num_devices = 0;
     g_sensor_manager.initialized = false;
-
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
 
     LOG_INF("Sensor manager deinitialized");
     return SENSOR_MANAGER_OK;
@@ -363,17 +268,13 @@ int sensor_manager_add_device(const struct device *device, const char *name, boo
         return SENSOR_MANAGER_ERROR_DEVICE_NOT_READY;
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
-
     /* Check if device already exists */
     if (find_device_info(device)) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
     /* Check if we have space for more devices */
     if (g_sensor_manager.num_devices >= SENSOR_MANAGER_MAX_DEVICES) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_MAX_DEVICES;
     }
 
@@ -387,7 +288,6 @@ int sensor_manager_add_device(const struct device *device, const char *name, boo
     }
 
     if (!dev_info) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_MAX_DEVICES;
     }
 
@@ -423,8 +323,6 @@ int sensor_manager_add_device(const struct device *device, const char *name, boo
     dev_info->active = true;
     g_sensor_manager.num_devices++;
 
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
-
     LOG_INF("Added sensor device: %s", name);
     return SENSOR_MANAGER_OK;
 }
@@ -439,28 +337,20 @@ int sensor_manager_remove_device(const struct device *device)
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
-
     struct sensor_device_info *dev_info = find_device_info(device);
     if (!dev_info) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
     }
 
-    /* Stop acquisition if active */
-    sensor_manager_stop_acquisition(device);
-
-    /* Free buffer memory */
-    if (dev_info->buffer_memory) {
-        uint8_t device_index = dev_info - g_sensor_manager.devices;
-        sensor_manager_pool_free(dev_info->buffer_memory, device_index);
+    /* Device cannot be removed during active acquisition */
+    if (g_sensor_manager.acquisition_active) {
+        LOG_ERR("Cannot remove device during active acquisition. Stop acquisition first.");
+        return SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE;
     }
 
     /* Clear device info */
     memset(dev_info, 0, sizeof(*dev_info));
     g_sensor_manager.num_devices--;
-
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
 
     LOG_INF("Removed sensor device");
     return SENSOR_MANAGER_OK;
@@ -476,24 +366,19 @@ int sensor_manager_enable_channel(const struct device *device, enum sensor_chann
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
-
     struct sensor_device_info *dev_info = find_device_info(device);
     if (!dev_info) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
     }
 
     /* Check if acquisition is active - prevent channel changes during acquisition */
-    if (dev_info->acquisition_active) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
+    if (g_sensor_manager.acquisition_active) {
         return SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE;
     }
 
     /* Check if channel is already enabled */
     for (int i = 0; i < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; i++) {
         if (dev_info->channels[i].enabled && dev_info->channels[i].channel == channel) {
-            k_mutex_unlock(&g_sensor_manager.manager_mutex);
             return SENSOR_MANAGER_OK; /* Already enabled */
         }
     }
@@ -509,11 +394,8 @@ int sensor_manager_enable_channel(const struct device *device, enum sensor_chann
     }
 
     if (dev_info->num_enabled_channels > SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_MAX_CHANNELS;
     }
-
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
 
     LOG_DBG("Enabled channel %d for device %s", channel, dev_info->name);
     return SENSOR_MANAGER_OK;
@@ -529,17 +411,13 @@ int sensor_manager_disable_channel(const struct device *device, enum sensor_chan
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
-
     struct sensor_device_info *dev_info = find_device_info(device);
     if (!dev_info) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
     }
 
     /* Check if acquisition is active - prevent channel changes during acquisition */
-    if (dev_info->acquisition_active) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
+    if (g_sensor_manager.acquisition_active) {
         return SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE;
     }
 
@@ -551,8 +429,6 @@ int sensor_manager_disable_channel(const struct device *device, enum sensor_chan
             break;
         }
     }
-
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
 
     LOG_DBG("Disabled channel %d for device %s", channel, dev_info->name);
     return SENSOR_MANAGER_OK;
@@ -570,11 +446,8 @@ int sensor_manager_set_trigger_callback(const struct device *device,
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
-
     struct sensor_device_info *dev_info = find_device_info(device);
     if (!dev_info) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
         return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
     }
 
@@ -583,123 +456,140 @@ int sensor_manager_set_trigger_callback(const struct device *device,
     dev_info->trigger.chan = SENSOR_CHAN_ALL;
     dev_info->callback = callback;
 
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
-
     LOG_DBG("Set trigger callback for device %s", dev_info->name);
     return SENSOR_MANAGER_OK;
 }
 
-int sensor_manager_start_acquisition(const struct device *device)
+int sensor_manager_start_acquisition_all(void)
 {
     if (!g_sensor_manager.initialized) {
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
     }
 
-    if (!device) {
+    /* Check if acquisition is already active */
+    if (g_sensor_manager.acquisition_active) {
+        return SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE;
+    }
+
+    /* Check if we have any devices */
+    if (g_sensor_manager.num_devices == 0) {
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
-
-    struct sensor_device_info *dev_info = find_device_info(device);
-    if (!dev_info) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
-        return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
-    }
-
-    /* Check if we have enabled channels */
-    if (dev_info->num_enabled_channels == 0) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
-        return SENSOR_MANAGER_ERROR_INVALID_PARAM;
-    }
-
-    /* Pre-compute fixed sample block size based on enabled channels with variable data sizes */
-    size_t total_size = sizeof(uint32_t); /* timestamp_ms */
-    
-    for (int i = 0; i < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; i++) {
-        if (!dev_info->channels[i].enabled) {
+    /* Calculate total memory needed for all devices */
+    size_t total_memory_needed = 0;
+    for (int i = 0; i < g_sensor_manager.num_devices; i++) {
+        struct sensor_device_info *dev_info = &g_sensor_manager.devices[i];
+        if (!dev_info->active) {
             continue;
         }
-        
-        /* Get actual data size for this channel */
-        size_t channel_data_size = get_sensor_channel_data_size(device, dev_info->channels[i].channel);
-        total_size += channel_data_size;
-    }
-    
-    dev_info->sample_block_size = total_size;
 
-    /* Calculate optimal buffer size based on actual sample block size */
-    dev_info->buffer_size = dev_info->requested_buffer_samples * dev_info->sample_block_size;
-    
-    /* Calculate device index for memory pool allocation */
-    uint8_t device_index = dev_info - g_sensor_manager.devices;
-    
-    /* Allocate buffer memory from static memory pool */
-    dev_info->buffer_memory = sensor_manager_pool_alloc(dev_info->buffer_size, device_index);
-    if (!dev_info->buffer_memory) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
-        LOG_ERR("Failed to allocate %zu bytes from memory pool for device %s", 
-                dev_info->buffer_size, dev_info->name);
+        /* Check if device has enabled channels */
+        if (dev_info->num_enabled_channels == 0) {
+            LOG_ERR("Device %s has no enabled channels", dev_info->name);
+            return SENSOR_MANAGER_ERROR_INVALID_PARAM;
+        }
+
+        /* Pre-compute fixed sample block size based on enabled channels */
+        size_t sample_size = sizeof(uint32_t); /* timestamp_ms */
+        for (int j = 0; j < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; j++) {
+            if (!dev_info->channels[j].enabled) {
+                continue;
+            }
+            size_t channel_data_size = get_sensor_channel_data_size(dev_info->device, dev_info->channels[j].channel);
+            sample_size += channel_data_size;
+        }
+        dev_info->sample_block_size = sample_size;
+
+        /* Calculate buffer size for this device */
+        dev_info->buffer_size = dev_info->requested_buffer_samples * dev_info->sample_block_size;
+        total_memory_needed += dev_info->buffer_size;
+    }
+
+    LOG_DBG("Total memory needed for all devices: %zu bytes", total_memory_needed);
+
+    /* Allocate memory from static pool for all devices */
+    uint8_t *memory_base = sensor_manager_pool_alloc_all(total_memory_needed);
+    if (!memory_base) {
+        LOG_ERR("Failed to allocate %zu bytes from memory pool for all devices", total_memory_needed);
         return SENSOR_MANAGER_ERROR_MEMORY_POOL_FULL;
     }
-    
-    /* Initialize ring buffer with optimal size */
-    ring_buf_init(&dev_info->data_buffer, dev_info->buffer_size, dev_info->buffer_memory);
-    LOG_DBG("Allocated optimized buffer: %zu bytes (%zu samples) for device %s from memory pool", 
-            dev_info->buffer_size, dev_info->requested_buffer_samples, dev_info->name);
 
-    /* Set up trigger with internal handler */
-    int ret = sensor_trigger_set(device, &dev_info->trigger, internal_data_ready_handler);
-    if (ret != 0) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
-        LOG_ERR("Failed to set trigger for device %s: %d", dev_info->name, ret);
-        return SENSOR_MANAGER_ERROR_TRIGGER_SETUP;
+    /* Assign memory regions to each device and initialize ring buffers */
+    uint8_t *current_memory = memory_base;
+    for (int i = 0; i < g_sensor_manager.num_devices; i++) {
+        struct sensor_device_info *dev_info = &g_sensor_manager.devices[i];
+        if (!dev_info->active) {
+            continue;
+        }
+
+        /* Assign memory region to this device */
+        dev_info->buffer_memory = current_memory;
+        current_memory += dev_info->buffer_size;
+
+        /* Initialize ring buffer */
+        ring_buf_init(&dev_info->data_buffer, dev_info->buffer_size, dev_info->buffer_memory);
+        
+        /* Set up trigger with internal handler */
+        int ret = sensor_trigger_set(dev_info->device, &dev_info->trigger, internal_data_ready_handler);
+        if (ret != 0) {
+            LOG_ERR("Failed to set trigger for device %s: %d", dev_info->name, ret);
+            /* Continue with other devices, don't fail completely */
+        }
+
+        /* Mark device acquisition as active */
+        dev_info->acquisition_active = true;
+        
+        LOG_DBG("Initialized buffer for device %s: %zu bytes (%zu samples)", 
+                dev_info->name, dev_info->buffer_size, dev_info->requested_buffer_samples);
     }
 
-    /* Mark acquisition as active */
-    dev_info->acquisition_active = true;
+    /* Mark global acquisition as active */
+    g_sensor_manager.acquisition_active = true;
 
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
-
-    LOG_INF("Started acquisition for device %s", dev_info->name);
+    LOG_INF("Started acquisition for all %d sensor devices (%zu bytes total)", 
+            g_sensor_manager.num_devices, total_memory_needed);
     return SENSOR_MANAGER_OK;
 }
 
-int sensor_manager_stop_acquisition(const struct device *device)
+int sensor_manager_stop_acquisition_all(void)
 {
     if (!g_sensor_manager.initialized) {
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
     }
 
-    if (!device) {
-        return SENSOR_MANAGER_ERROR_INVALID_PARAM;
+    /* Check if acquisition is active */
+    if (!g_sensor_manager.acquisition_active) {
+        return SENSOR_MANAGER_OK; /* Already stopped */
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
+    /* Stop acquisition for all devices */
+    for (int i = 0; i < g_sensor_manager.num_devices; i++) {
+        struct sensor_device_info *dev_info = &g_sensor_manager.devices[i];
+        if (!dev_info->active || !dev_info->acquisition_active) {
+            continue;
+        }
 
-    struct sensor_device_info *dev_info = find_device_info(device);
-    if (!dev_info) {
-        k_mutex_unlock(&g_sensor_manager.manager_mutex);
-        return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
-    }
+        /* Disable trigger */
+        sensor_trigger_set(dev_info->device, &dev_info->trigger, NULL);
 
-    /* Disable trigger */
-    sensor_trigger_set(device, &dev_info->trigger, NULL);
-
-    /* Mark acquisition as inactive */
-    dev_info->acquisition_active = false;
-    
-    /* Free buffer memory since acquisition is stopped */
-    if (dev_info->buffer_memory) {
-        uint8_t device_index = dev_info - g_sensor_manager.devices;
-        sensor_manager_pool_free(dev_info->buffer_memory, device_index);
+        /* Mark device acquisition as inactive */
+        dev_info->acquisition_active = false;
+        
+        /* Clear buffer memory pointer (will be freed globally) */
         dev_info->buffer_memory = NULL;
         dev_info->buffer_size = 0;
+        
+        LOG_DBG("Stopped acquisition for device %s", dev_info->name);
     }
 
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
+    /* Free all memory back to the pool */
+    sensor_manager_pool_free_all();
 
-    LOG_INF("Stopped acquisition for device %s", dev_info->name);
+    /* Mark global acquisition as inactive */
+    g_sensor_manager.acquisition_active = false;
+
+    LOG_INF("Stopped acquisition for all sensor devices and freed memory pool");
     return SENSOR_MANAGER_OK;
 }
 
@@ -948,8 +838,6 @@ int sensor_manager_get_enabled_channels(const struct device *device,
         return SENSOR_MANAGER_ERROR_DEVICE_NOT_FOUND;
     }
 
-    k_mutex_lock(&g_sensor_manager.manager_mutex, K_FOREVER);
-
     size_t count = 0;
     for (int i = 0; i < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE && count < max_channels; i++) {
         if (dev_info->channels[i].enabled) {
@@ -959,7 +847,6 @@ int sensor_manager_get_enabled_channels(const struct device *device,
     }
 
     *num_channels = count;
-    k_mutex_unlock(&g_sensor_manager.manager_mutex);
 
     return SENSOR_MANAGER_OK;
 }
@@ -981,4 +868,19 @@ struct sensor_manager *sensor_manager_get_instance(void)
 size_t sensor_manager_get_channel_data_size(const struct device *device, enum sensor_channel channel)
 {
     return get_sensor_channel_data_size(device, channel);
+}
+
+size_t sensor_manager_get_sample_block_size(const struct device *device)
+{
+    if (!g_sensor_manager.initialized || !device) {
+        return 0;
+    }
+
+    struct sensor_device_info *dev_info = find_device_info(device);
+    if (!dev_info) {
+        return 0;
+    }
+
+    /* Return the pre-computed sample block size (only valid during active acquisition) */
+    return dev_info->sample_block_size;
 }

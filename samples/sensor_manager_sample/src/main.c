@@ -40,12 +40,17 @@ static void process_device_data(const struct device *device, const char *device_
     struct sensor_sample_block *data_buffer;
     size_t blocks_read;
     
-    /* Since we now have variable-length data, we need to allocate buffer dynamically */
-    /* For simplicity, we'll allocate a large enough buffer for the sample */
-    size_t max_buffer_size = 10 * (sizeof(uint32_t) + 6 * sizeof(struct sensor_value)); /* 6 channels max */
-    data_buffer = k_malloc(max_buffer_size);
+    /* Get the actual sample block size for this device */
+    size_t sample_block_size = sensor_manager_get_sample_block_size(device);
+    if (sample_block_size == 0) {
+        LOG_WRN("No sample block size available for %s (acquisition not active?)", device_name);
+        return;
+    }
+    
+    /* Allocate buffer for one sample block using the actual size */
+    data_buffer = k_malloc(sample_block_size);
     if (!data_buffer) {
-        LOG_ERR("Failed to allocate buffer for sensor data");
+        LOG_ERR("Failed to allocate %zu bytes for sensor data", sample_block_size);
         return;
     }
     
@@ -62,13 +67,13 @@ static void process_device_data(const struct device *device, const char *device_
                                                  &num_enabled_channels);
         
         if (ret == SENSOR_MANAGER_OK && num_enabled_channels > 0) {
-            /* Parse the variable-length data */
+            /* Parse the variable-length data using the actual sample block size */
             for (size_t i = 0; i < blocks_read; i++) {
                 struct sensor_sample_block *block = (struct sensor_sample_block *)
-                    ((uint8_t *)data_buffer + i * (sizeof(uint32_t) + num_enabled_channels * sizeof(struct sensor_value)));
+                    ((uint8_t *)data_buffer + i * sample_block_size);
                 
-                LOG_INF("  [%u ms] Block with %zu channels:", 
-                       block->timestamp_ms, num_enabled_channels);
+                LOG_INF("  [%u ms] Block with %zu channels (block size: %zu bytes):", 
+                       block->timestamp_ms, num_enabled_channels, sample_block_size);
                 
                 /* Parse channel data */
                 uint8_t *data_ptr = block->data;
@@ -118,8 +123,9 @@ static void report_statistics(void)
                                           &overflow_count, &buffer_usage);
         
         if (ret == SENSOR_MANAGER_OK) {
-            LOG_INF("ICM20948: %u events, %u overflows, %u%% buffer usage",
-                   data_ready_count, overflow_count, buffer_usage);
+            size_t sample_block_size = sensor_manager_get_sample_block_size(icm_dev);
+            LOG_INF("ICM20948: %u events, %u overflows, %u%% buffer usage, %zu byte samples",
+                   data_ready_count, overflow_count, buffer_usage, sample_block_size);
         }
     }
     
@@ -176,14 +182,6 @@ static int setup_sensors(void)
                 } else {
                     LOG_WRN("Failed to set callback: %d", ret);
                 }
-                
-                /* Start data acquisition */
-                ret = sensor_manager_start_acquisition(icm_dev);
-                if (ret == SENSOR_MANAGER_OK) {
-                    LOG_INF("Started ICM20948 data acquisition");
-                } else {
-                    LOG_ERR("Failed to start acquisition: %d", ret);
-                }
             } else {
                 LOG_ERR("Failed to add ICM20948 to sensor manager: %d", ret);
             }
@@ -207,11 +205,11 @@ static int setup_sensors(void)
             sensor_manager_set_trigger_callback(temp_dev,
                                                SENSOR_TRIG_DATA_READY,
                                                sensor_data_ready_callback);
-            sensor_manager_start_acquisition(temp_dev);
             LOG_INF("Temperature sensor configured");
         }
     }
     
+    LOG_INF("Sensor setup completed. Acquisition will be started after all devices are configured.");
     return SENSOR_MANAGER_OK;
 }
 
@@ -222,12 +220,8 @@ static void cleanup_sensors(void)
 {
     LOG_INF("Cleaning up sensors...");
     
-    /* Stop and remove all devices */
-    const struct device *icm_dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(icm20948));
-    if (icm_dev && sensor_manager_is_device_managed(icm_dev)) {
-        sensor_manager_stop_acquisition(icm_dev);
-        sensor_manager_remove_device(icm_dev);
-    }
+    /* Stop acquisition for all devices */
+    sensor_manager_stop_acquisition_all();
     
     /* Deinitialize sensor manager */
     sensor_manager_deinit();
@@ -256,6 +250,16 @@ int main(void)
         LOG_ERR("Sensor setup failed: %d", ret);
         return -1;
     }
+    
+    /* Start data acquisition for all configured devices */
+    LOG_INF("Starting data acquisition for all devices...");
+    ret = sensor_manager_start_acquisition_all();
+    if (ret != SENSOR_MANAGER_OK) {
+        LOG_ERR("Failed to start acquisition: %d", ret);
+        cleanup_sensors();
+        return -1;
+    }
+    LOG_INF("Data acquisition started successfully");
     
     /* Application main loop */
     int64_t last_data_process = 0;

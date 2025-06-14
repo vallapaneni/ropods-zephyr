@@ -97,29 +97,18 @@ struct sensor_device_info {
 };
 
 /**
- * @brief Memory block descriptor for static memory pool
- */
-struct sensor_manager_memory_block {
-    uint8_t *ptr;                    /**< Pointer to memory block */
-    size_t size;                     /**< Size of the block */
-    bool allocated;                  /**< Whether block is allocated */
-    uint8_t device_index;            /**< Index of device using this block (if allocated) */
-};
-
-/**
  * @brief Sensor manager context structure
  */
 struct sensor_manager {
     struct sensor_device_info devices[SENSOR_MANAGER_MAX_DEVICES];        /**< Array of managed devices */
     uint8_t num_devices;                                                  /**< Number of registered devices */
-    struct k_mutex manager_mutex;                                         /**< Mutex for manager operations */
     bool initialized;                                                     /**< Initialization status */
+    bool acquisition_active;                                              /**< Global acquisition state */
     
     /* Static memory pool for ring buffers */
     uint8_t memory_pool[SENSOR_MANAGER_MEMORY_POOL_SIZE];                 /**< Static memory pool */
-    struct sensor_manager_memory_block memory_blocks[SENSOR_MANAGER_MAX_DEVICES]; /**< Memory block descriptors */
-    size_t memory_pool_used;                                              /**< Bytes used from memory pool */
-    struct k_mutex memory_mutex;                                          /**< Mutex for memory pool operations */
+    uint8_t *allocated_memory;                                            /**< Pointer to allocated block (or NULL) */
+    size_t allocated_size;                                                /**< Size of allocated block */
 };
 
 /**
@@ -204,20 +193,25 @@ int sensor_manager_set_trigger_callback(const struct device *device,
                                        sensor_trigger_handler_t callback);
 
 /**
- * @brief Start data acquisition for a sensor device
+ * @brief Start data acquisition for all managed sensor devices
  * 
- * @param device Pointer to the sensor device
+ * Allocates memory from the static pool for all devices and starts
+ * data acquisition. This must be called after all devices have been
+ * added and their channels configured.
+ * 
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
-int sensor_manager_start_acquisition(const struct device *device);
+int sensor_manager_start_acquisition_all(void);
 
 /**
- * @brief Stop data acquisition for a sensor device
+ * @brief Stop data acquisition for all managed sensor devices
  * 
- * @param device Pointer to the sensor device
+ * Stops data acquisition for all devices and frees all allocated
+ * memory back to the static pool.
+ * 
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
-int sensor_manager_stop_acquisition(const struct device *device);
+int sensor_manager_stop_acquisition_all(void);
 
 /**
  * @brief Get the latest sensor data for a specific channel
@@ -295,6 +289,22 @@ int sensor_manager_get_enabled_channels(const struct device *device,
  * @return Size in bytes of the channel data, or sizeof(struct sensor_value) as fallback
  */
 size_t sensor_manager_get_channel_data_size(const struct device *device, enum sensor_channel channel);
+
+/**
+ * @brief Get the total sample block size for a sensor device
+ * 
+ * This function returns the total size in bytes of one complete sample block
+ * for the specified device, including timestamp and all enabled channel data.
+ * This is useful for applications that need to allocate buffers or understand
+ * the memory layout of sensor data.
+ * 
+ * Note: This function only returns a valid size if acquisition is active,
+ * as the sample block size is calculated during acquisition startup.
+ * 
+ * @param device Pointer to the sensor device
+ * @return Size in bytes of one complete sample block, or 0 if acquisition is not active
+ */
+size_t sensor_manager_get_sample_block_size(const struct device *device);
 
 /**
  * @brief Check if a sensor device is managed by the sensor manager
