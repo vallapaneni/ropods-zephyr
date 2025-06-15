@@ -1,8 +1,10 @@
 /**
- * @file main.c
- * @brief Sensor Manager Sample Application
+ * @file main_new.c
+ * @brief New Sensor Manager Sample Application
  * 
- * This sample demonstrates the sensor manager functionality with real sensor devices.
+ * This sample demonstrates the new application-level buffer threshold callback system.
+ * The sensor manager now uses a single shared ring buffer for all device data, and the
+ * application sets up a callback that triggers when the buffer exceeds a threshold.
  */
 
 #include <zephyr/kernel.h>
@@ -10,145 +12,129 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
 
 #include "sensor_manager.h"
 
 LOG_MODULE_REGISTER(sensor_manager_sample, LOG_LEVEL_INF);
 
 /* Sample configuration */
-#define MAX_CALLBACKS 10
+#define BUFFER_THRESHOLD_BYTES 512     /* Trigger callback when buffer has 512+ bytes */
+#define MAX_READ_BYTES 256             /* Read up to 256 bytes per callback */
+#define MAX_CALLBACKS 10               /* Exit after this many callbacks */
 
 /* Application state */
 static K_SEM_DEFINE(app_exit_sem, 0, 1);
-static uint32_t total_callback_count = 0;
+static uint32_t buffer_callback_count = 0;
 
 /* Forward declarations */
-static void process_device_data(const struct device *device, const char *device_name);
+static void buffer_threshold_callback(size_t available_bytes, void *user_data);
+static void process_buffer_data(uint8_t *buffer, size_t bytes_read);
 
 /**
- * @brief User callback for data ready events with sample counting
+ * @brief Buffer threshold callback - called when shared buffer exceeds threshold
+ * 
+ * This is the new application-level trigger mechanism that replaces device-level callbacks.
+ * It's called when the shared buffer has more data than the configured threshold.
  */
-static void sensor_data_ready_callback(const struct device *device,
-                                      const struct sensor_trigger *trigger)
+static void buffer_threshold_callback(size_t available_bytes, void *user_data)
 {
-    total_callback_count++;
+    buffer_callback_count++;
     
-    LOG_INF("Sample trigger fired for device: %s (callback #%u/%u)", 
-            device->name, total_callback_count, MAX_CALLBACKS);
+    LOG_INF("=== Buffer Threshold Callback #%u ===", buffer_callback_count);
+    LOG_INF("Available bytes in shared buffer: %zu", available_bytes);
     
-    /* Process sensor data immediately in callback */
-    process_device_data(device, device->name);
+    /* Read data from the shared buffer */
+    uint8_t *read_buffer = k_malloc(MAX_READ_BYTES);
+    if (!read_buffer) {
+        LOG_ERR("Failed to allocate read buffer");
+        return;
+    }
     
-    /* Stop sensors and signal application exit after MAX_CALLBACKS */
-    if (total_callback_count >= MAX_CALLBACKS) {
-        LOG_INF("Reached maximum callbacks (%u), stopping sensors...", MAX_CALLBACKS);
+    size_t bytes_read;
+    int ret = sensor_manager_read_buffer_bytes(read_buffer, MAX_READ_BYTES, &bytes_read);
+    
+    if (ret == SENSOR_MANAGER_OK && bytes_read > 0) {
+        LOG_INF("Successfully read %zu bytes from shared buffer", bytes_read);
         
-        /* Stop acquisition for all devices */
-        sensor_manager_stop_acquisition_all();
+        /* Process the raw buffer data */
+        process_buffer_data(read_buffer, bytes_read);
         
-        /* Signal main thread to exit */
+        /* Show remaining buffer size */
+        size_t remaining = sensor_manager_get_buffer_data_available();
+        LOG_INF("Remaining bytes in buffer: %zu", remaining);
+    } else {
+        LOG_WRN("Failed to read from buffer: %d, bytes_read: %zu", ret, bytes_read);
+    }
+    
+    k_free(read_buffer);
+    
+    /* Exit application after enough callbacks */
+    if (buffer_callback_count >= MAX_CALLBACKS) {
+        LOG_INF("Reached maximum callbacks (%u), signaling exit", MAX_CALLBACKS);
         k_sem_give(&app_exit_sem);
     }
 }
 
 /**
- * @brief Process sensor data from a device
+ * @brief Process raw buffer data and parse sensor samples
+ * 
+ * This function demonstrates how to parse the compact sample format from the shared buffer.
+ * Each sample starts with: [device_id][device_location][time_delta][data...]
  */
-static void process_device_data(const struct device *device, const char *device_name)
+static void process_buffer_data(uint8_t *buffer, size_t bytes_read)
 {
-    struct sensor_sample_block *data_buffer;
-    size_t blocks_read;
+    size_t offset = 0;
+    uint32_t sample_count = 0;
     
-    /* Get the actual sample block size for this device */
-    size_t sample_block_size = sensor_manager_get_sample_block_size(device);
-    if (sample_block_size == 0) {
-        LOG_WRN("No sample block size available for %s (acquisition not active?)", device_name);
-        return;
-    }
+    LOG_INF("--- Processing Buffer Data ---");
     
-    /* Allocate buffer for one sample block using the actual size */
-    data_buffer = k_malloc(sample_block_size);
-    if (!data_buffer) {
-        LOG_ERR("Failed to allocate %zu bytes for sensor data", sample_block_size);
-        return;
-    }
-    
-    int ret = sensor_manager_read_data_buffer(device, data_buffer, 1, &blocks_read);
-    
-    if (ret == SENSOR_MANAGER_OK && blocks_read > 0) {
-        LOG_INF("%s: Read %zu sensor sample blocks", device_name, blocks_read);
+    while (offset < bytes_read) {
+        /* Make sure we have at least the header */
+        if (offset + sizeof(struct sensor_sample_block) > bytes_read) {
+            LOG_WRN("Incomplete sample header at offset %zu, stopping", offset);
+            break;
+        }
         
-        /* Get the enabled channels to know the data format */
-        enum sensor_channel enabled_channels[SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE];
-        size_t num_enabled_channels;
-        ret = sensor_manager_get_enabled_channels(device, enabled_channels, 
-                                                 ARRAY_SIZE(enabled_channels), 
-                                                 &num_enabled_channels);
+        struct sensor_sample_block *sample = (struct sensor_sample_block *)(buffer + offset);
         
-        if (ret == SENSOR_MANAGER_OK && num_enabled_channels > 0) {
-            /* Parse the variable-length data using the actual sample block size */
-            for (size_t i = 0; i < blocks_read; i++) {
-                struct sensor_sample_block *block = (struct sensor_sample_block *)
-                    ((uint8_t *)data_buffer + i * sample_block_size);
-                
-                LOG_INF("  [%u ms] Block with %zu channels (block size: %zu bytes):", 
-                       block->timestamp_ms, num_enabled_channels, sample_block_size);
-                
-                /* Parse channel data */
-                uint8_t *data_ptr = block->data;
-                for (size_t j = 0; j < MIN(num_enabled_channels, 3); j++) {
-                    /* Get channel data size */
-                    size_t channel_data_size = sensor_manager_get_channel_data_size(device, enabled_channels[j]);
-                    struct sensor_value *values = (struct sensor_value *)data_ptr;
-                    
-                    LOG_INF("    Ch %d: %d.%06d",
-                           enabled_channels[j],
-                           values[0].val1,
-                           values[0].val2);
-                    
-                    data_ptr += channel_data_size;
-                }
-                
-                if (num_enabled_channels > 3) {
-                    LOG_INF("    ... and %zu more channels", num_enabled_channels - 3);
-                }
-            }
+        LOG_INF("Sample %u: Device ID %u, Location %u, Time Delta %u ms", 
+               ++sample_count, sample->device_id, sample->device_location, sample->time_delta);
+        
+        /* Move past the header */
+        offset += sizeof(struct sensor_sample_block);
+        
+        /* For demonstration, assume each sample has 6 channels (3 accel + 3 gyro) */
+        /* In a real application, you'd know the channel configuration */
+        size_t data_size = 6 * sizeof(struct sensor_value);
+        
+        if (offset + data_size <= bytes_read) {
+            struct sensor_value *values = (struct sensor_value *)(buffer + offset);
+            LOG_INF("  Accel: X=%d.%06d, Y=%d.%06d, Z=%d.%06d", 
+                   values[0].val1, values[0].val2,
+                   values[1].val1, values[1].val2, 
+                   values[2].val1, values[2].val2);
+            LOG_INF("  Gyro:  X=%d.%06d, Y=%d.%06d, Z=%d.%06d", 
+                   values[3].val1, values[3].val2,
+                   values[4].val1, values[4].val2, 
+                   values[5].val1, values[5].val2);
             
-            if (blocks_read > 1) {
-                LOG_INF("  ... and %zu more blocks", blocks_read - 1);
-            }
+            offset += data_size;
         } else {
-            LOG_WRN("Could not get enabled channels for %s", device_name);
+            LOG_WRN("Incomplete sample data at offset %zu, stopping", offset);
+            break;
+        }
+        
+        /* Show only first few samples to avoid log spam */
+        if (sample_count >= 3) {
+            if (offset < bytes_read) {
+                LOG_INF("... and more samples (total buffer: %zu bytes)", bytes_read);
+            }
+            break;
         }
     }
     
-    k_free(data_buffer);
-}
-
-/**
- * @brief Report statistics for all managed devices
- */
-static void report_statistics(void)
-{
-    LOG_INF("=== Sensor Manager Statistics ===");
-    
-    /* Check ICM20948 if available */
-    const struct device *icm_dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(icm20948));
-    if (icm_dev && sensor_manager_is_device_managed(icm_dev)) {
-        uint32_t data_ready_count, overflow_count;
-        uint8_t buffer_usage;
-        
-        int ret = sensor_manager_get_stats(icm_dev, &data_ready_count,
-                                          &overflow_count, &buffer_usage);
-        
-        if (ret == SENSOR_MANAGER_OK) {
-            size_t sample_block_size = sensor_manager_get_sample_block_size(icm_dev);
-            LOG_INF("ICM20948: %u events, %u overflows, %u%% buffer usage, %zu byte samples",
-                   data_ready_count, overflow_count, buffer_usage, sample_block_size);
-        }
-    }
-    
-    LOG_INF("==============================");
+    LOG_INF("Processed %u complete samples from %zu bytes", sample_count, offset);
 }
 
 /**
@@ -175,10 +161,10 @@ static int setup_sensors(void)
         if (device_is_ready(icm_dev)) {
             LOG_INF("ICM20948 device found and ready");
             
-            /* Add device to sensor manager */
-            ret = sensor_manager_add_device(icm_dev, "ICM20948", false, 128);
+            /* Add device to sensor manager with device ID 1 and location 0 */
+            ret = sensor_manager_add_device(icm_dev, 1, 0, false);
             if (ret == SENSOR_MANAGER_OK) {
-                LOG_INF("Added ICM20948 to sensor manager");
+                LOG_INF("Added ICM20948 to sensor manager (ID: 1, Location: 0)");
                 
                 /* Enable accelerometer channels */
                 sensor_manager_enable_channel(icm_dev, SENSOR_CHAN_ACCEL_X);
@@ -192,17 +178,7 @@ static int setup_sensors(void)
                 sensor_manager_enable_channel(icm_dev, SENSOR_CHAN_GYRO_Z);
                 LOG_INF("Enabled gyroscope channels");
                 
-                /* Set up data ready callback with sample counting trigger */
-                ret = sensor_manager_set_trigger_callback(icm_dev,
-                                                         SENSOR_TRIG_DATA_READY,
-                                                         sensor_data_ready_callback,
-                                                         10,  /* Trigger every 10 samples */
-                                                         true); /* Repeat trigger */
-                if (ret == SENSOR_MANAGER_OK) {
-                    LOG_INF("Set up data ready callback (trigger every 10 samples)");
-                } else {
-                    LOG_WRN("Failed to set callback: %d", ret);
-                }
+                LOG_INF("ICM20948 setup complete - using shared buffer model");
             } else {
                 LOG_ERR("Failed to add ICM20948 to sensor manager: %d", ret);
             }
@@ -210,45 +186,76 @@ static int setup_sensors(void)
             LOG_WRN("ICM20948 device not ready");
         }
     } else {
-        LOG_WRN("ICM20948 device not found in device tree");
+        LOG_WRN("ICM20948 device not found");
     }
     
-    /* Check for other potential sensor devices */
-    LOG_INF("Checking for other sensor devices...");
-    
-    /* Try to find generic sensor devices */
-    const struct device *temp_dev = device_get_binding("TEMP_0");
-    if (temp_dev && device_is_ready(temp_dev)) {
-        LOG_INF("Found temperature sensor");
-        ret = sensor_manager_add_device(temp_dev, "Temperature", false, 32);
-        if (ret == SENSOR_MANAGER_OK) {
-            sensor_manager_enable_channel(temp_dev, SENSOR_CHAN_AMBIENT_TEMP);
-            sensor_manager_set_trigger_callback(temp_dev,
-                                               SENSOR_TRIG_DATA_READY,
-                                               sensor_data_ready_callback,
-                                               5,    /* Trigger every 5 samples */
-                                               true); /* Repeat trigger */
-            LOG_INF("Temperature sensor configured (trigger every 5 samples)");
+    /* Setup die temperature sensor if available */
+    const struct device *temp_dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(die_temp));
+    if (temp_dev) {
+        if (device_is_ready(temp_dev)) {
+            LOG_INF("Die temperature sensor found and ready");
+            
+            /* Add device to sensor manager with device ID 2 and location 1 */
+            ret = sensor_manager_add_device(temp_dev, 2, 1, false);
+            if (ret == SENSOR_MANAGER_OK) {
+                LOG_INF("Added die temperature sensor to sensor manager (ID: 2, Location: 1)");
+                
+                /* Enable temperature channel */
+                sensor_manager_enable_channel(temp_dev, SENSOR_CHAN_DIE_TEMP);
+                LOG_INF("Enabled die temperature channel");
+                
+                LOG_INF("Die temperature sensor setup complete");
+            } else {
+                LOG_ERR("Failed to add die temperature sensor to sensor manager: %d", ret);
+            }
+        } else {
+            LOG_WRN("Die temperature sensor not ready");
         }
+    } else {
+        LOG_WRN("Die temperature sensor not found");
     }
     
-    LOG_INF("Sensor setup completed. Acquisition will be started after all devices are configured.");
     return SENSOR_MANAGER_OK;
 }
 
 /**
- * @brief Cleanup sensor resources
+ * @brief Setup application-level buffer threshold callback
+ */
+static int setup_buffer_threshold_callback(void)
+{
+    int ret;
+    
+    LOG_INF("Setting up buffer threshold callback...");
+    LOG_INF("Threshold: %u bytes, Max read: %u bytes", BUFFER_THRESHOLD_BYTES, MAX_READ_BYTES);
+    
+    /* Set up the application-level buffer threshold callback */
+    ret = sensor_manager_set_buffer_threshold_callback(BUFFER_THRESHOLD_BYTES, 
+                                                      buffer_threshold_callback, 
+                                                      NULL);
+    
+    if (ret != SENSOR_MANAGER_OK) {
+        LOG_ERR("Failed to set buffer threshold callback: %d", ret);
+        return ret;
+    }
+    
+    LOG_INF("Buffer threshold callback configured successfully");
+    return SENSOR_MANAGER_OK;
+}
+
+/**
+ * @brief Cleanup sensors and manager
  */
 static void cleanup_sensors(void)
 {
     LOG_INF("Cleaning up sensors...");
     
-    /* Stop acquisition for all devices */
+    /* Stop data acquisition */
     sensor_manager_stop_acquisition_all();
     
     /* Deinitialize sensor manager */
     sensor_manager_deinit();
-    LOG_INF("Sensor cleanup completed");
+    
+    LOG_INF("Sensor cleanup complete");
 }
 
 /**
@@ -261,16 +268,25 @@ int main(void)
     printk("\n");
     printk("=====================================\n");
     printk("  Sensor Manager Sample Application  \n");
+    printk("   New Buffer Threshold Callback API \n");
     printk("=====================================\n");
     printk("Build: %s %s\n", __DATE__, __TIME__);
     printk("\n");
     
-    LOG_INF("Starting Sensor Manager Sample");
+    LOG_INF("Starting Sensor Manager Sample with Buffer Threshold Callbacks");
     
     /* Setup sensors */
     ret = setup_sensors();
     if (ret != SENSOR_MANAGER_OK) {
         LOG_ERR("Sensor setup failed: %d", ret);
+        return -1;
+    }
+    
+    /* Setup buffer threshold callback */
+    ret = setup_buffer_threshold_callback();
+    if (ret != SENSOR_MANAGER_OK) {
+        LOG_ERR("Buffer threshold callback setup failed: %d", ret);
+        cleanup_sensors();
         return -1;
     }
     
@@ -284,9 +300,11 @@ int main(void)
     }
     LOG_INF("Data acquisition started successfully");
     
-    /* Application main - wait for callbacks to complete */
-    LOG_INF("Waiting for sensor callbacks to complete...");
-    printk("Application will exit after %u sensor callbacks\n\n", MAX_CALLBACKS);
+    /* Application main loop - wait for buffer threshold callbacks */
+    LOG_INF("Waiting for buffer threshold callbacks...");
+    printk("Application will exit after %u buffer threshold callbacks\n", MAX_CALLBACKS);
+    printk("Buffer threshold: %u bytes, Read size: %u bytes\n\n", 
+           BUFFER_THRESHOLD_BYTES, MAX_READ_BYTES);
     
     /* Wait for the callback to signal completion */
     k_sem_take(&app_exit_sem, K_FOREVER);

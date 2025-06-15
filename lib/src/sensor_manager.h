@@ -45,15 +45,16 @@ extern "C" {
 #define SENSOR_MANAGER_MEMORY_ALIGN 4
 
 /**
- * @brief Simplified sensor sample block structure with variable-length data
+ * @brief Simplified sensor sample block structure with compact addressing
  * 
- * Contains timestamp followed by variable-length sensor data in the order channels were enabled.
+ * Contains device ID, location, time delta since last sample, followed by variable-length sensor data.
  * The application layer knows which channels are enabled and their order.
- * Each channel may have different data lengths (1 or more sensor_value structures).
- * Layout in buffer: [timestamp_ms][channel_data][channel_data]... (variable lengths, fixed order)
+ * Layout in buffer: [device_id][device_location][time_delta][channel_data][channel_data]...
  */
 struct __packed sensor_sample_block {
-    uint32_t timestamp_ms;          /**< Timestamp in milliseconds */
+    uint8_t device_id;              /**< Device identifier (1 byte) */
+    uint8_t device_location;        /**< Device location identifier (1 byte) */
+    uint16_t time_delta;            /**< Time elapsed since last sample in milliseconds (2 bytes) */
     uint8_t data[];                 /**< Variable-length sensor data in enabled channel order */
 };
 
@@ -70,7 +71,8 @@ struct sensor_channel_config {
  */
 struct sensor_device_info {
     const struct device *device;                                           /**< Pointer to sensor device */
-    char name[SENSOR_MANAGER_MAX_NAME_LEN];                               /**< Device name */
+    uint8_t device_id;                                                    /**< Device identifier (set by application) */
+    uint8_t device_location;                                              /**< Device location identifier (set by application) */
     bool active;                                                          /**< Device active status */
     bool samples_prefetched;                                              /**< Some device drivers prefetch the data */
     bool acquisition_active;                                              /**< Data acquisition in progress */
@@ -82,25 +84,24 @@ struct sensor_device_info {
     
     /* Trigger configuration */
     struct sensor_trigger trigger;                                        /**< Data ready trigger */
-    sensor_trigger_handler_t callback;                                    /**< User callback function */
-    
-    /* Data buffer */
-    struct ring_buf data_buffer;                                          /**< Ring buffer for sensor data */
-    uint8_t *buffer_memory;                                               /**< Memory for ring buffer */
-    size_t buffer_size;                                                   /**< Buffer size in bytes */
-    size_t requested_buffer_samples;                                      /**< Requested number of samples to buffer */
-    struct k_mutex buffer_mutex;                                          /**< Mutex for buffer access */
-    
+
     /* Statistics */
     uint32_t data_ready_count;                                            /**< Count of data ready events */
-    uint32_t buffer_overflow_count;                                       /**< Count of buffer overflows */
     
-    /* Sample count trigger mechanism */
-    uint32_t sample_count_threshold;                                      /**< Trigger after this many samples */
-    uint32_t samples_collected_since_trigger;                             /**< Current sample count */
-    bool sample_trigger_enabled;                                          /**< Sample count trigger enabled */
-    bool sample_trigger_repeat;                                           /**< Repeat trigger every N samples */
+    /* Device-specific timestamp for time delta calculation */
+    uint32_t last_sample_timestamp_ms;                                    /**< Last sample timestamp for this device */
 };
+
+/**
+ * @brief Application-level trigger callback function type
+ * 
+ * Called when shared buffer data size exceeds the configured threshold.
+ * Application should read data from the shared buffer in response.
+ * 
+ * @param available_bytes Number of bytes available in shared buffer
+ * @param user_data User data pointer passed during callback setup
+ */
+typedef void (*sensor_manager_buffer_callback_t)(size_t available_bytes, void *user_data);
 
 /**
  * @brief Sensor manager context structure
@@ -111,10 +112,19 @@ struct sensor_manager {
     bool initialized;                                                     /**< Initialization status */
     bool acquisition_active;                                              /**< Global acquisition state */
     
+    /* Shared ring buffer for all device data */
+    struct ring_buf shared_data_buffer;                                   /**< Shared ring buffer for all devices */
+    struct k_mutex shared_buffer_mutex;                                   /**< Mutex for shared buffer access */
+    
     /* Static memory pool for ring buffers */
     uint8_t memory_pool[SENSOR_MANAGER_MEMORY_POOL_SIZE];                 /**< Static memory pool */
     uint8_t *allocated_memory;                                            /**< Pointer to allocated block (or NULL) */
     size_t allocated_size;                                                /**< Size of allocated block */
+    
+    /* Application-level buffer threshold triggering */
+    size_t buffer_threshold_bytes;                                        /**< Buffer threshold in bytes */
+    sensor_manager_buffer_callback_t buffer_callback;                     /**< Buffer threshold callback */
+    void *buffer_callback_user_data;                                     /**< User data for buffer callback */
 };
 
 /**
@@ -133,6 +143,7 @@ enum sensor_manager_error {
     SENSOR_MANAGER_ERROR_MEMORY_POOL_FULL,    /**< Static memory pool exhausted */
     SENSOR_MANAGER_ERROR_TRIGGER_SETUP,       /**< Trigger setup failed */
     SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE,  /**< Cannot change channels during acquisition */
+    SENSOR_MANAGER_ERROR_NOT_SUPPORTED,       /**< Function not supported in current design */
 };
 
 /**
@@ -153,12 +164,12 @@ int sensor_manager_deinit(void);
  * @brief Add a sensor device to the manager
  * 
  * @param device Pointer to the sensor device
- * @param name Human-readable name for the device
+ * @param sensor_id Sensor identifier (1-255, 0 is reserved)
+ * @param sensor_location Sensor location identifier
  * @param samples_prefetched Whether this device pre-fetches samples
- * @param buffer_size Size of the data buffer (number of sample blocks, 0 for default)
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
-int sensor_manager_add_device(const struct device *device, const char *name, bool samples_prefetched, size_t buffer_size);
+int sensor_manager_add_device(const struct device *device, uint8_t device_id, uint8_t device_location, bool samples_prefetched);
 
 /**
  * @brief Remove a sensor device from the manager
@@ -187,26 +198,6 @@ int sensor_manager_enable_channel(const struct device *device, enum sensor_chann
 int sensor_manager_disable_channel(const struct device *device, enum sensor_channel channel);
 
 /**
- * @brief Set data ready trigger callback for a sensor device with sample count trigger
- * 
- * This function sets up both the hardware data ready trigger and an optional
- * sample count trigger. The callback will be called after the specified number
- * of samples have been collected.
- * 
- * @param device Pointer to the sensor device
- * @param trigger_type Type of trigger (e.g., SENSOR_TRIG_DATA_READY)
- * @param callback Callback function to be called on trigger
- * @param sample_count_threshold Number of samples to collect before triggering callback (0 = trigger on every sample)
- * @param repeat If true, trigger repeatedly every N samples; if false, trigger only once
- * @return SENSOR_MANAGER_OK on success, error code otherwise
- */
-int sensor_manager_set_trigger_callback(const struct device *device, 
-                                       enum sensor_trigger_type trigger_type,
-                                       sensor_trigger_handler_t callback,
-                                       uint32_t sample_count_threshold,
-                                       bool repeat);
-
-/**
  * @brief Start data acquisition for all managed sensor devices
  * 
  * Allocates memory from the static pool for all devices and starts
@@ -228,105 +219,33 @@ int sensor_manager_start_acquisition_all(void);
 int sensor_manager_stop_acquisition_all(void);
 
 /**
- * @brief Get the latest sensor data for a specific channel
+ * @brief Read sensor sample blocks from shared buffer for a specific sensor
  * 
- * @param device Pointer to the sensor device
- * @param channel Channel to read from
- * @param timestamp_ms Pointer to store the timestamp in milliseconds
- * @param value Pointer to store the sensor value
- * @return SENSOR_MANAGER_OK on success, error code otherwise
- */
-int sensor_manager_get_latest_data(const struct device *device, 
-                                  enum sensor_channel channel,
-                                  uint32_t *timestamp_ms,
-                                  struct sensor_value *value);
-
-/**
- * @brief Read multiple sensor sample blocks from buffer
- * 
- * @param device Pointer to the sensor device
+ * @param sensor_id Sensor ID to filter by
  * @param data Array to store sensor sample blocks
  * @param max_blocks Maximum number of sample blocks to read
  * @param blocks_read Pointer to store actual number of blocks read
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
-int sensor_manager_read_data_buffer(const struct device *device,
-                                   struct sensor_sample_block *data,
-                                   size_t max_blocks,
-                                   size_t *blocks_read);
+int sensor_manager_read_shared_buffer_by_sensor(uint8_t sensor_id,
+                                               struct sensor_sample_block *data,
+                                               size_t max_blocks,
+                                               size_t *blocks_read);
 
 /**
- * @brief Clear the data buffer for a sensor device
+ * @brief Clear the shared data buffer (all devices)
  * 
- * @param device Pointer to the sensor device
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
-int sensor_manager_clear_buffer(const struct device *device);
+int sensor_manager_clear_shared_buffer(void);
 
 /**
- * @brief Get statistics for a sensor device
+ * @brief Get the sensor ID for a managed sensor device
  * 
  * @param device Pointer to the sensor device
- * @param data_ready_count Pointer to store data ready event count
- * @param buffer_overflow_count Pointer to store buffer overflow count
- * @param buffer_usage Pointer to store current buffer usage (0-100%)
- * @return SENSOR_MANAGER_OK on success, error code otherwise
+ * @return Sensor ID, or 0 if device is not managed
  */
-int sensor_manager_get_stats(const struct device *device,
-                            uint32_t *data_ready_count,
-                            uint32_t *buffer_overflow_count,
-                            uint8_t *buffer_usage);
-
-/**
- * @brief Get list of enabled channels for a sensor device
- * 
- * @param device Pointer to the sensor device
- * @param channels Array to store enabled channels
- * @param max_channels Maximum number of channels to store
- * @param num_channels Pointer to store actual number of enabled channels
- * @return SENSOR_MANAGER_OK on success, error code otherwise
- */
-int sensor_manager_get_enabled_channels(const struct device *device,
-                                       enum sensor_channel *channels,
-                                       size_t max_channels,
-                                       size_t *num_channels);
-
-/**
- * @brief Get the data size for a specific sensor channel
- * 
- * This function queries the sensor device to determine how many bytes
- * of data a specific channel provides. This is useful for applications
- * that need to handle variable-sized sensor data.
- * 
- * @param device Pointer to the sensor device
- * @param channel The sensor channel to query
- * @return Size in bytes of the channel data, or sizeof(struct sensor_value) as fallback
- */
-size_t sensor_manager_get_channel_data_size(const struct device *device, enum sensor_channel channel);
-
-/**
- * @brief Get the total sample block size for a sensor device
- * 
- * This function returns the total size in bytes of one complete sample block
- * for the specified device, including timestamp and all enabled channel data.
- * This is useful for applications that need to allocate buffers or understand
- * the memory layout of sensor data.
- * 
- * Note: This function only returns a valid size if acquisition is active,
- * as the sample block size is calculated during acquisition startup.
- * 
- * @param device Pointer to the sensor device
- * @return Size in bytes of one complete sample block, or 0 if acquisition is not active
- */
-size_t sensor_manager_get_sample_block_size(const struct device *device);
-
-/**
- * @brief Check if a sensor device is managed by the sensor manager
- * 
- * @param device Pointer to the sensor device
- * @return true if device is managed, false otherwise
- */
-bool sensor_manager_is_device_managed(const struct device *device);
+uint8_t sensor_manager_get_sensor_id(const struct device *device);
 
 /**
  * @brief Get the sensor manager instance (for internal use)
@@ -334,6 +253,43 @@ bool sensor_manager_is_device_managed(const struct device *device);
  * @return Pointer to the sensor manager instance
  */
 struct sensor_manager *sensor_manager_get_instance(void);
+
+/**
+ * @brief Set up application-level trigger based on shared buffer data availability
+ * 
+ * Sets up a callback that will be triggered when the amount of data in the shared
+ * buffer exceeds the specified threshold. This replaces device-level triggers
+ * with application-level buffer management.
+ * 
+ * @param threshold_bytes Minimum number of bytes in buffer to trigger callback
+ * @param callback Callback function to call when threshold is exceeded
+ * @param user_data User data pointer to pass to callback
+ * @return SENSOR_MANAGER_OK on success, error code otherwise
+ */
+int sensor_manager_set_buffer_threshold_callback(size_t threshold_bytes,
+                                                sensor_manager_buffer_callback_t callback,
+                                                void *user_data);
+
+/**
+ * @brief Read data from shared buffer up to specified byte count
+ * 
+ * Reads raw bytes from the shared buffer for application-level parsing.
+ * Applications can use this to read exactly the amount of data they want
+ * to process based on the buffer threshold callback.
+ * 
+ * @param buffer Buffer to store the read data
+ * @param max_bytes Maximum number of bytes to read
+ * @param bytes_read Pointer to store actual number of bytes read
+ * @return SENSOR_MANAGER_OK on success, error code otherwise
+ */
+int sensor_manager_read_buffer_bytes(uint8_t *buffer, size_t max_bytes, size_t *bytes_read);
+
+/**
+ * @brief Get current number of bytes available in shared buffer
+ * 
+ * @return Number of bytes currently available to read
+ */
+size_t sensor_manager_get_buffer_data_available(void);
 
 #ifdef __cplusplus
 }
