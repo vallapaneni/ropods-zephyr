@@ -15,5 +15,6 @@ manifest:
           - cmsis          # ARM CMSIS headers (required for ARM targets)
           - hal_nordic     # Nordic HAL (required for nRF52DK/nRF52832)
           - segger         # Segger RTT for debugging and logging
+          - mbedtls        # Crypto library (required for BLE)
   self:
     path: ropods-zephyr
