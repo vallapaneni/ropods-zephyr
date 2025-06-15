@@ -11,4 +11,7 @@ target_include_directories(app PRIVATE ../../lib/src)
 target_include_directories(app PRIVATE ../../drivers/sensor/icm20948)
 
 # Add source files
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE 
+    src/main.c
+    src/ble_sensor_service.c
+)
