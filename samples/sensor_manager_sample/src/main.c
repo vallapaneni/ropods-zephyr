@@ -17,7 +17,7 @@
 #include <zephyr/sys/util.h>
 
 #include "sensor_manager.h"
-#include "ble_sensor_service.h"
+#include "ropods_ble_service.h"
 #include "icm20948.h"
 
 LOG_MODULE_REGISTER(sensor_manager_sample, LOG_LEVEL_INF);
@@ -34,8 +34,8 @@ static uint32_t buffer_callback_count = 0;
 static bool ble_streaming_active = false;
 
 /* BLE packet management */
-static uint8_t ble_packet_buffer[sizeof(struct sensor_data_packet) + (SAMPLES_PER_BLE_PACKET * 11 * sizeof(float))];
-static struct sensor_data_packet *current_ble_packet = (struct sensor_data_packet *)ble_packet_buffer;
+static uint8_t ble_packet_buffer[sizeof(struct ropods_data_packet) + (SAMPLES_PER_BLE_PACKET * 11 * sizeof(float))];
+static struct ropods_data_packet *current_ble_packet = (struct ropods_data_packet *)ble_packet_buffer;
 static uint8_t samples_in_packet = 0;
 static uint32_t total_samples_sent = 0;
 static uint32_t total_packets_sent = 0;
@@ -43,7 +43,7 @@ static uint32_t total_packets_sent = 0;
 /* Forward declarations */
 static void buffer_threshold_callback(size_t available_bytes, void *user_data);
 static void process_buffer_data(uint8_t *buffer, size_t bytes_read);
-static int control_command_handler(const struct control_command *cmd, struct control_response *resp);
+static int control_command_handler(const struct ropods_control_command *cmd, struct ropods_control_response *resp);
 static int send_ble_packet_if_ready(void);
 static void convert_sensor_value_to_float(const struct sensor_value *val, float *result);
 
@@ -60,14 +60,14 @@ static void convert_sensor_value_to_float(const struct sensor_value *val, float 
  */
 static int send_ble_packet_if_ready(void)
 {
-	if (samples_in_packet >= SAMPLES_PER_BLE_PACKET && ble_sensor_is_connected()) {
+	if (samples_in_packet >= SAMPLES_PER_BLE_PACKET && ropods_ble_is_streaming()) {
 		current_ble_packet->sample_count = samples_in_packet;
 		
 		/* Calculate packet size based on actual data */
-		size_t packet_size = sizeof(struct sensor_data_packet) + 
+		size_t packet_size = sizeof(struct ropods_data_packet) + 
 				     samples_in_packet * 11 * sizeof(float); /* timestamp + quat + accel + gyro */
 		
-		int ret = ble_sensor_send_data_packet(current_ble_packet, packet_size);
+		int ret = ropods_ble_send_data_packet(current_ble_packet, packet_size);
 		if (ret == 0) {
 			total_packets_sent++;
 			total_samples_sent += samples_in_packet;
@@ -91,7 +91,7 @@ static int send_ble_packet_if_ready(void)
 /**
  * @brief Generic control command handler - supports attribute set/get and channel control
  */
-static int control_command_handler(const struct control_command *cmd, struct control_response *resp)
+static int control_command_handler(const struct ropods_control_command *cmd, struct ropods_control_response *resp)
 {
 	LOG_INF("Control command: 0x%02x, device=%d, channel/attr=0x%04x, value=%u", 
 		cmd->command, cmd->device_id, cmd->channel_or_attr, cmd->value);
@@ -104,7 +104,7 @@ static int control_command_handler(const struct control_command *cmd, struct con
 	}
 	
 	switch (cmd->command) {
-	case CTRL_CMD_CHANNEL_ENABLE:
+	case ROPODS_CMD_CHANNEL_ENABLE:
 		LOG_INF("Enable channel %d on device %d", cmd->channel_or_attr, cmd->device_id);
 		if (cmd->device_id == 0 || cmd->device_id == 1) {
 			int ret = sensor_manager_enable_channel(icm_dev, (enum sensor_channel)cmd->channel_or_attr);
@@ -115,7 +115,7 @@ static int control_command_handler(const struct control_command *cmd, struct con
 		}
 		break;
 		
-	case CTRL_CMD_CHANNEL_DISABLE:
+	case ROPODS_CMD_CHANNEL_DISABLE:
 		LOG_INF("Disable channel %d on device %d", cmd->channel_or_attr, cmd->device_id);
 		if (cmd->device_id == 0 || cmd->device_id == 1) {
 			int ret = sensor_manager_disable_channel(icm_dev, (enum sensor_channel)cmd->channel_or_attr);
@@ -126,11 +126,11 @@ static int control_command_handler(const struct control_command *cmd, struct con
 		}
 		break;
 		
-	case CTRL_CMD_SET_ATTRIBUTE:
+	case ROPODS_CMD_SET_ATTRIBUTE:
 		LOG_INF("Set attribute 0x%04x to %u on device %d", cmd->channel_or_attr, cmd->value, cmd->device_id);
 		
 		switch (cmd->channel_or_attr) {
-		case ATTR_SAMPLE_RATE:
+		case ROPODS_ATTR_SAMPLE_RATE:
 			LOG_INF("Setting sample rate to %u Hz", cmd->value);
 			/* Set sample rate using sensor API */
 			{
@@ -148,7 +148,7 @@ static int control_command_handler(const struct control_command *cmd, struct con
 			}
 			break;
 			
-		case ATTR_FULL_SCALE_RANGE:
+		case ROPODS_ATTR_FULL_SCALE_RANGE:
 			LOG_INF("Setting full scale range to %u", cmd->value);
 			/* Set full scale range using sensor API */
 			{
@@ -166,7 +166,7 @@ static int control_command_handler(const struct control_command *cmd, struct con
 			}
 			break;
 			
-		case ATTR_POWER_MODE:
+		case ROPODS_ATTR_POWER_MODE:
 			LOG_INF("Setting power mode to %u (not implemented)", cmd->value);
 			/* Power mode setting would depend on sensor driver */
 			break;
@@ -177,11 +177,11 @@ static int control_command_handler(const struct control_command *cmd, struct con
 		}
 		break;
 		
-	case CTRL_CMD_GET_ATTRIBUTE:
+	case ROPODS_CMD_GET_ATTRIBUTE:
 		LOG_INF("Get attribute 0x%04x from device %d", cmd->channel_or_attr, cmd->device_id);
 		
 		switch (cmd->channel_or_attr) {
-		case ATTR_SAMPLE_RATE:
+		case ROPODS_ATTR_SAMPLE_RATE:
 		{
 			struct sensor_value odr_val;
 			int ret = sensor_attr_get(icm_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_val);
@@ -195,7 +195,7 @@ static int control_command_handler(const struct control_command *cmd, struct con
 		}
 		break;
 		
-		case ATTR_FULL_SCALE_RANGE:
+		case ROPODS_ATTR_FULL_SCALE_RANGE:
 		{
 			struct sensor_value fs_val;
 			int ret = sensor_attr_get(icm_dev, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_FULL_SCALE, &fs_val);
@@ -215,17 +215,17 @@ static int control_command_handler(const struct control_command *cmd, struct con
 		}
 		break;
 		
-	case CTRL_CMD_START_STREAMING:
+	case ROPODS_CMD_START_STREAMING:
 		ble_streaming_active = true;
 		LOG_INF("BLE streaming started by client");
 		break;
 		
-	case CTRL_CMD_STOP_STREAMING:
+	case ROPODS_CMD_STOP_STREAMING:
 		ble_streaming_active = false;
 		LOG_INF("BLE streaming stopped by client");
 		break;
 		
-	case CTRL_CMD_RESET_COUNTERS:
+	case ROPODS_CMD_RESET_COUNTERS:
 		total_samples_sent = 0;
 		total_packets_sent = 0;
 		current_ble_packet->packet_id = 0;
@@ -322,6 +322,8 @@ static void process_buffer_data(uint8_t *buffer, size_t bytes_read)
 		if (samples_in_packet == 0) {
 			current_ble_packet->device_id = sample->device_id;
 			current_ble_packet->device_location = sample->device_location;
+			current_ble_packet->data_format = 1; /* ICM20948 quaternion format */
+			current_ble_packet->timestamp = k_uptime_get() * 1000; /* Convert to microseconds */
 		}
 		
 		/* Move past the header */
@@ -499,22 +501,23 @@ static int setup_ble_service(void)
     LOG_INF("Setting up BLE sensor service...");
     
     /* Initialize BLE service */
-    ret = ble_sensor_service_init();
+    ret = ropods_ble_service_init();
     if (ret != 0) {
         LOG_ERR("Failed to initialize BLE service: %d", ret);
         return ret;
     }
     
     /* Register control command callback */
-    ble_sensor_register_control_callback(control_command_handler);
+    ropods_ble_register_control_callback(control_command_handler);
     
     /* Setup device information */
-    struct device_info devices[] = {
+    struct ropods_device_info devices[] = {
         {
             .device_id = 1,
             .device_location = 0,
             .device_type = 1, /* IMU */
             .num_channels = 10, /* quaternion (4) + accel (3) + gyro (3) */
+            .capabilities = 0x001F, /* Basic sensor capabilities */
             .device_name = "ICM20948"
         },
         {
@@ -522,18 +525,19 @@ static int setup_ble_service(void)
             .device_location = 1,
             .device_type = 2, /* Temperature */
             .num_channels = 1,
+            .capabilities = 0x0001, /* Basic sensor capability */
             .device_name = "Die_Temp"
         }
     };
     
-    ret = ble_sensor_update_device_info(devices, ARRAY_SIZE(devices));
+    ret = ropods_ble_update_device_info(devices, ARRAY_SIZE(devices));
     if (ret != 0) {
         LOG_ERR("Failed to update device info: %d", ret);
         return ret;
     }
     
     /* Start advertising */
-    ret = ble_sensor_start_advertising();
+    ret = ropods_ble_start_advertising("PPOD-Sensor");
     if (ret != 0) {
         LOG_ERR("Failed to start BLE advertising: %d", ret);
         return ret;

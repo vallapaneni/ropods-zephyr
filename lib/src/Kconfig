@@ -54,3 +54,51 @@ config SENSOR_MANAGER_THREAD_SAFE
 	  sensor manager will be used from a single thread.
 
 endif # SENSOR_MANAGER
+
+# ROPODS BLE Service Configuration
+config ROPODS_BLE_SERVICE
+	bool "Enable ROPODS BLE Service"
+	default n
+	depends on BT && BT_PERIPHERAL
+	help
+	  Enable the generic ROPODS BLE service for streaming sensor data
+	  and device control over Bluetooth Low Energy.
+
+if ROPODS_BLE_SERVICE
+
+config ROPODS_BLE_DEVICE_NAME
+	string "Default BLE device name"
+	default "ROPODS-Device"
+	help
+	  Default device name to advertise over BLE.
+
+config ROPODS_BLE_MAX_DEVICES
+	int "Maximum number of devices in device info"
+	default 8
+	range 1 32
+	help
+	  Maximum number of devices that can be reported in the device
+	  information characteristic.
+
+config ROPODS_BLE_LOG_LEVEL
+	int "ROPODS BLE Service log level"
+	default 3
+	range 0 4
+	help
+	  Log level for ROPODS BLE service:
+	  0 = Off, 1 = Error, 2 = Warning, 3 = Info, 4 = Debug
+
+config ROPODS_BLE_AUTO_START_ADVERTISING
+	bool "Auto-start advertising on init"
+	default y
+	help
+	  Automatically start BLE advertising when the service is initialized.
+
+config ROPODS_BLE_CONNECTION_TIMEOUT
+	int "Connection timeout (seconds)"
+	default 60
+	range 10 3600
+	help
+	  Timeout for BLE connections in seconds. Set to 0 to disable timeout.
+
+endif # ROPODS_BLE_SERVICE
