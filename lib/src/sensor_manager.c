@@ -4,15 +4,11 @@
  */
 
 #include "sensor_manager.h"
+#include "sensor_common.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
 #include <string.h>
 #include <stdlib.h>
-
-/* Define SENSOR_ATTR_DATA_LENGTH if not available in Zephyr */
-#ifndef SENSOR_ATTR_DATA_LENGTH
-#define SENSOR_ATTR_DATA_LENGTH 118
-#endif
 
 LOG_MODULE_REGISTER(sensor_manager, CONFIG_SENSOR_MANAGER_LOG_LEVEL);
 
@@ -85,15 +81,10 @@ static uint8_t *sensor_manager_pool_alloc_all(size_t size)
         LOG_ERR("Memory already allocated, call stop_acquisition_all first");
         return NULL;
     }
-
-    /* Align size to memory alignment boundary */
-    size_t aligned_size = (size + SENSOR_MANAGER_MEMORY_ALIGN - 1) & ~(SENSOR_MANAGER_MEMORY_ALIGN - 1);
-    
-    /* Allocate from beginning of pool */
+    // No alignment needed; assume size is always aligned
     g_sensor_manager.allocated_memory = g_sensor_manager.memory_pool;
-    g_sensor_manager.allocated_size = aligned_size;
-
-    LOG_DBG("Allocated %zu bytes (aligned from %zu) from memory pool", aligned_size, size);
+    g_sensor_manager.allocated_size = size;
+    LOG_DBG("Allocated %zu bytes from memory pool", size);
     return g_sensor_manager.allocated_memory;
 }
 
@@ -169,11 +160,24 @@ static void internal_data_ready_handler(const struct device *device,
     /* Get contiguous space for writing */
     available_space = ring_buf_put_claim(&g_sensor_manager.shared_data_buffer, &write_ptr, sample_size);
     if (available_space < sample_size) {
-        /* This should not happen after making room, but handle gracefully */
-        k_mutex_unlock(&g_sensor_manager.shared_buffer_mutex);
-        LOG_ERR("Failed to get space in shared buffer for device ID %d location %d after cleanup", 
-                dev_info->device_id, dev_info->device_location);
-        return;
+        // Claim whatever contiguous space is available
+        if (available_space > 0) {
+            memset(write_ptr, 0, available_space); // Fill with zeros
+            ring_buf_put_finish(&g_sensor_manager.shared_data_buffer, available_space);
+        }
+        // Try again from the start
+        available_space = ring_buf_put_claim(&g_sensor_manager.shared_data_buffer, &write_ptr, sample_size);
+        if (available_space < sample_size) {
+            // Move read pointer ahead by one block of read_size (threshold_bytes) and try again
+            ring_buf_get_finish(&g_sensor_manager.shared_data_buffer, g_sensor_manager.buffer_threshold_bytes);
+            available_space = ring_buf_put_claim(&g_sensor_manager.shared_data_buffer, &write_ptr, sample_size);
+            if (available_space < sample_size) {
+                k_mutex_unlock(&g_sensor_manager.shared_buffer_mutex);
+                LOG_ERR("Failed to get space in shared buffer for device ID %d location %d after all recovery attempts", 
+                        dev_info->device_id, dev_info->device_location);
+                return;
+            }
+        }
     }
 
     /* Zero-copy path: Write directly to shared ring buffer memory using compact format */
@@ -447,7 +451,7 @@ int sensor_manager_disable_channel(const struct device *device, enum sensor_chan
     return SENSOR_MANAGER_OK;
 }
 
-int sensor_manager_start_acquisition_all(void)
+int sensor_manager_start_acquisition_all(size_t pool_size)
 {
     if (!g_sensor_manager.initialized) {
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
@@ -458,52 +462,23 @@ int sensor_manager_start_acquisition_all(void)
         return SENSOR_MANAGER_ERROR_ACQUISITION_ACTIVE;
     }
 
-    /* Check if we have any devices */
-    if (g_sensor_manager.num_devices == 0) {
-        return SENSOR_MANAGER_ERROR_INVALID_PARAM;
+    size_t total_shared_buffer_size = 0;
+    if (pool_size > 0) {
+        total_shared_buffer_size = pool_size;
+    } else if (g_sensor_manager.buffer_threshold_bytes > 0) {
+        total_shared_buffer_size = 2*g_sensor_manager.buffer_threshold_bytes;
+    } else {
+        total_shared_buffer_size = SENSOR_MANAGER_MEMORY_POOL_SIZE;
     }
 
-    /* Calculate total memory needed for shared buffer and prepare device sample sizes */
-    size_t total_shared_buffer_size = 0;
+    // Compute max sample size across all active devices
     size_t max_sample_size = 0;
-    
     for (int i = 0; i < g_sensor_manager.num_devices; i++) {
         struct sensor_device_info *dev_info = &g_sensor_manager.devices[i];
-        if (!dev_info->active) {
-            continue;
-        }
-
-        /* Check if device has enabled channels */
-        if (dev_info->num_enabled_channels == 0) {
-            LOG_ERR("Device ID %d location %d has no enabled channels", 
-                    dev_info->device_id, dev_info->device_location);
-            return SENSOR_MANAGER_ERROR_INVALID_PARAM;
-        }
-
-        /* Pre-compute fixed sample block size based on enabled channels and compact format */
-        size_t sample_size = 1 + 1 + 2; /* device_id (1) + device_location (1) + time_delta (2) */
-        for (int j = 0; j < SENSOR_MANAGER_MAX_CHANNELS_PER_DEVICE; j++) {
-            if (!dev_info->channels[j].enabled) {
-                continue;
-            }
-            size_t channel_data_size = get_sensor_channel_data_size(dev_info->device, dev_info->channels[j].channel);
-            sample_size += channel_data_size;
-        }
-        dev_info->sample_block_size = sample_size;
-
-        /* Use a default buffer size calculation for shared buffer sizing
-         * Since we don't have requested_buffer_samples anymore, use a reasonable default */
-        size_t device_buffer_contribution = SENSOR_MANAGER_DEFAULT_BUFFER_SIZE * dev_info->sample_block_size;
-        total_shared_buffer_size += device_buffer_contribution;
-        
-        if (dev_info->sample_block_size > max_sample_size) {
+        if (dev_info->active && dev_info->sample_block_size > max_sample_size) {
             max_sample_size = dev_info->sample_block_size;
         }
     }
-
-    /* Add some extra space to shared buffer for interleaving efficiency */
-    total_shared_buffer_size += max_sample_size * 4; /* 4 extra samples worth of space */
-
     LOG_DBG("Total shared buffer size needed: %zu bytes (max sample: %zu)", total_shared_buffer_size, max_sample_size);
 
     /* Allocate memory from static pool for shared buffer */
@@ -650,27 +625,29 @@ int sensor_manager_set_buffer_threshold_callback(size_t threshold_bytes,
     return SENSOR_MANAGER_OK;
 }
 
-int sensor_manager_read_buffer_bytes(uint8_t *buffer, size_t max_bytes, size_t *bytes_read)
+int sensor_manager_read_buffer_bytes(uint8_t **data_ptr, size_t max_bytes, size_t *bytes_read)
 {
     if (!g_sensor_manager.initialized) {
         return SENSOR_MANAGER_ERROR_NOT_INITIALIZED;
     }
-
-    if (!buffer || !bytes_read || max_bytes == 0) {
+    if (!data_ptr || !bytes_read || max_bytes == 0) {
         return SENSOR_MANAGER_ERROR_INVALID_PARAM;
     }
-
     k_mutex_lock(&g_sensor_manager.shared_buffer_mutex, K_FOREVER);
-
     uint32_t available_data = ring_buf_size_get(&g_sensor_manager.shared_data_buffer);
     size_t to_read = (max_bytes < available_data) ? max_bytes : available_data;
-    
-    uint32_t actual_read = ring_buf_get(&g_sensor_manager.shared_data_buffer, buffer, to_read);
-    *bytes_read = actual_read;
-
+    uint8_t *ptr = NULL;
+    uint32_t claimed = ring_buf_get_claim(&g_sensor_manager.shared_data_buffer, (uint8_t **)&ptr, to_read);
+    if (claimed > 0) {
+        *data_ptr = ptr;
+        *bytes_read = claimed;
+        ring_buf_get_finish(&g_sensor_manager.shared_data_buffer, claimed);
+    } else {
+        *data_ptr = NULL;
+        *bytes_read = 0;
+    }
     k_mutex_unlock(&g_sensor_manager.shared_buffer_mutex);
-
-    LOG_DBG("Read %zu bytes from shared buffer (%zu requested)", actual_read, max_bytes);
+    LOG_DBG("Zero-copy read %zu bytes from shared buffer (%zu requested)", claimed, max_bytes);
     return SENSOR_MANAGER_OK;
 }
 
@@ -685,4 +662,19 @@ size_t sensor_manager_get_buffer_data_available(void)
     k_mutex_unlock(&g_sensor_manager.shared_buffer_mutex);
 
     return available;
+}
+
+/* Internal function renamed and made public */
+size_t sensor_manager_get_channel_data_size(const struct device *device, enum sensor_channel channel)
+{
+    if (!device) {
+        return sizeof(struct sensor_value);
+    }
+    struct sensor_value data_length;
+    int ret = sensor_attr_get(device, channel, SENSOR_ATTR_DATA_LENGTH, &data_length);
+    if (ret == 0 && data_length.val1 > 0) {
+        return data_length.val1 * sizeof(struct sensor_value);
+    }
+    LOG_DBG("Could not get data length for channel %d, assuming 1 sensor_value", channel);
+    return sizeof(struct sensor_value);
 }

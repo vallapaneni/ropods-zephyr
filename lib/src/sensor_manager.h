@@ -206,7 +206,7 @@ int sensor_manager_disable_channel(const struct device *device, enum sensor_chan
  * 
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
-int sensor_manager_start_acquisition_all(void);
+int sensor_manager_start_acquisition_all(size_t pool_size);
 
 /**
  * @brief Stop data acquisition for all managed sensor devices
@@ -217,20 +217,6 @@ int sensor_manager_start_acquisition_all(void);
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
 int sensor_manager_stop_acquisition_all(void);
-
-/**
- * @brief Read sensor sample blocks from shared buffer for a specific sensor
- * 
- * @param sensor_id Sensor ID to filter by
- * @param data Array to store sensor sample blocks
- * @param max_blocks Maximum number of sample blocks to read
- * @param blocks_read Pointer to store actual number of blocks read
- * @return SENSOR_MANAGER_OK on success, error code otherwise
- */
-int sensor_manager_read_shared_buffer_by_sensor(uint8_t sensor_id,
-                                               struct sensor_sample_block *data,
-                                               size_t max_blocks,
-                                               size_t *blocks_read);
 
 /**
  * @brief Clear the shared data buffer (all devices)
@@ -246,6 +232,17 @@ int sensor_manager_clear_shared_buffer(void);
  * @return Sensor ID, or 0 if device is not managed
  */
 uint8_t sensor_manager_get_sensor_id(const struct device *device);
+
+/**
+ * @brief Get the data size in bytes for a specific sensor channel
+ *
+ * Tries to get the actual data length using SENSOR_ATTR_DATA_LENGTH, or falls back to sizeof(struct sensor_value).
+ *
+ * @param device Pointer to the sensor device
+ * @param channel The sensor channel to query
+ * @return Size in bytes of the channel data
+ */
+size_t sensor_manager_get_channel_data_size(const struct device *device, enum sensor_channel channel);
 
 /**
  * @brief Get the sensor manager instance (for internal use)
@@ -277,12 +274,12 @@ int sensor_manager_set_buffer_threshold_callback(size_t threshold_bytes,
  * Applications can use this to read exactly the amount of data they want
  * to process based on the buffer threshold callback.
  * 
- * @param buffer Buffer to store the read data
+ * @param data_ptr Pointer to store the address of the data in the ring buffer
  * @param max_bytes Maximum number of bytes to read
  * @param bytes_read Pointer to store actual number of bytes read
  * @return SENSOR_MANAGER_OK on success, error code otherwise
  */
-int sensor_manager_read_buffer_bytes(uint8_t *buffer, size_t max_bytes, size_t *bytes_read);
+int sensor_manager_read_buffer_bytes(uint8_t **data_ptr, size_t max_bytes, size_t *bytes_read);
 
 /**
  * @brief Get current number of bytes available in shared buffer

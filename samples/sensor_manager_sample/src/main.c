@@ -511,26 +511,13 @@ static int setup_ble_service(void)
     ropods_ble_register_control_callback(control_command_handler);
     
     /* Setup device information */
-    struct ropods_device_info devices[] = {
-        {
-            .device_id = 1,
-            .device_location = 0,
-            .device_type = 1, /* IMU */
-            .num_channels = 10, /* quaternion (4) + accel (3) + gyro (3) */
-            .capabilities = 0x001F, /* Basic sensor capabilities */
-            .device_name = "ICM20948"
-        },
-        {
-            .device_id = 2,
-            .device_location = 1,
-            .device_type = 2, /* Temperature */
-            .num_channels = 1,
-            .capabilities = 0x0001, /* Basic sensor capability */
-            .device_name = "Die_Temp"
-        }
+    struct ropods_device_info_entry sensors[] = {
+        { .sensor_id = 1, .sensor_location = 0 },
+        { .sensor_id = 2, .sensor_location = 1 }
     };
-    
-    ret = ropods_ble_update_device_info(devices, ARRAY_SIZE(devices));
+    uint8_t hw_rev = 1; // Example HW revision
+    uint8_t fw_rev = 1; // Example FW revision
+    ret = ropods_ble_update_device_info(sensors, ARRAY_SIZE(sensors), hw_rev, fw_rev);
     if (ret != 0) {
         LOG_ERR("Failed to update device info: %d", ret);
         return ret;
@@ -599,9 +586,19 @@ int main(void)
         return -1;
     }
     
+    /* Register device pointers with BLE service */
+    const struct device *icm20948 = DEVICE_DT_GET_ANY(invensense_icm20948);
+    if (icm20948) {
+        ropods_ble_register_device(icm20948, 1);
+    }
+    const struct device *die_temp = DEVICE_DT_GET_ANY(zephyr_temp_sensor);
+    if (die_temp) {
+        ropods_ble_register_device(die_temp, 2);
+    }
+    
     /* Start data acquisition for all configured devices */
     LOG_INF("Starting data acquisition for all devices...");
-    ret = sensor_manager_start_acquisition_all();
+    ret = sensor_manager_start_acquisition_all(0); // Use 0 for default pool size logic
     if (ret != SENSOR_MANAGER_OK) {
         LOG_ERR("Failed to start acquisition: %d", ret);
         cleanup_sensors();

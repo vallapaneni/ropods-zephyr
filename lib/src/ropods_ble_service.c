@@ -4,6 +4,7 @@
  */
 
 #include "ropods_ble_service.h"
+#include "sensor_manager.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
@@ -12,6 +13,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/services/dis.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/drivers/sensor.h>
 
 LOG_MODULE_REGISTER(ropods_ble_service, CONFIG_ROPODS_BLE_LOG_LEVEL);
 
@@ -34,11 +36,21 @@ static struct ropods_control_response control_resp = {0};
 static uint8_t device_info_buffer[256] = {0};
 static size_t device_info_size = 0;
 
+/* Device pointer storage */
+struct ble_device_entry {
+    const struct device *dev;
+    uint8_t device_id;
+};
+
+static struct ble_device_entry ble_devices[ROPODS_BLE_MAX_DEVICES];
+static uint8_t ble_device_count = 0;
+
 /* Forward declarations */
 static void connected(struct bt_conn *conn, uint8_t err);
 static void disconnected(struct bt_conn *conn, uint8_t reason);
 static void le_param_updated(struct bt_conn *conn, uint16_t interval, 
                            uint16_t latency, uint16_t timeout);
+static int handle_control_command_direct(const struct ropods_control_command *cmd, struct ropods_control_response *resp);
 
 /* Connection callbacks */
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -95,19 +107,21 @@ static ssize_t control_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 		atomic_set(&streaming_active, 1);
 		LOG_INF("Data streaming started");
 		break;
-		
 	case ROPODS_CMD_STOP_STREAMING:
 		atomic_set(&streaming_active, 0);
 		LOG_INF("Data streaming stopped");
 		break;
-		
 	case ROPODS_CMD_RESET_COUNTERS:
 		ropods_ble_reset_stats();
 		LOG_INF("Statistics reset");
 		break;
-		
+	case ROPODS_CMD_CHANNEL_ENABLE:
+	case ROPODS_CMD_CHANNEL_DISABLE:
+	case ROPODS_CMD_SET_ATTRIBUTE:
+	case ROPODS_CMD_GET_ATTRIBUTE:
+		handle_control_command_direct(&control_cmd, &control_resp);
+		break;
 	default:
-		/* Forward to application callback */
 		if (control_callback) {
 			int ret = control_callback(&control_cmd, &control_resp);
 			if (ret != 0) {
@@ -342,30 +356,26 @@ void ropods_ble_register_control_callback(ropods_control_callback_t callback)
 	LOG_INF("Control callback %sregistered", callback ? "" : "un");
 }
 
-int ropods_ble_update_device_info(const struct ropods_device_info *devices, uint8_t count)
+int ropods_ble_update_device_info(const struct ropods_device_info_entry *sensors, uint8_t num_sensors, uint8_t hw_rev, uint8_t fw_rev)
 {
-	size_t total_size = 0;
-	
-	if (!devices || count == 0) {
-		device_info_size = 0;
-		return 0;
-	}
-
-	/* Calculate total size needed */
-	total_size = sizeof(uint8_t) + (count * sizeof(struct ropods_device_info));
-	
-	if (total_size > sizeof(device_info_buffer)) {
-		LOG_ERR("Device info too large: %zu > %zu", total_size, sizeof(device_info_buffer));
-		return -ENOMEM;
-	}
-
-	/* Pack device info */
-	device_info_buffer[0] = count;
-	memcpy(&device_info_buffer[1], devices, count * sizeof(struct ropods_device_info));
-	device_info_size = total_size;
-
-	LOG_INF("Updated device info: %d devices, %zu bytes", count, device_info_size);
-	return 0;
+    size_t total_size = 0;
+    if ((!sensors && num_sensors > 0) || num_sensors > ROPODS_BLE_MAX_DEVICES) {
+        device_info_size = 0;
+        return 0;
+    }
+    /* Calculate total size: num_sensors + (2 bytes per sensor) + hw_rev + fw_rev */
+    total_size = sizeof(uint8_t) + (num_sensors * sizeof(struct ropods_device_info_entry)) + 2;
+    if (total_size > sizeof(device_info_buffer)) {
+        LOG_ERR("Device info too large: %zu > %zu", total_size, sizeof(device_info_buffer));
+        return -ENOMEM;
+    }
+    device_info_buffer[0] = num_sensors;
+    memcpy(&device_info_buffer[1], sensors, num_sensors * sizeof(struct ropods_device_info_entry));
+    device_info_buffer[1 + num_sensors * sizeof(struct ropods_device_info_entry)] = hw_rev;
+    device_info_buffer[1 + num_sensors * sizeof(struct ropods_device_info_entry) + 1] = fw_rev;
+    device_info_size = total_size;
+    LOG_INF("Updated device info: %d sensors, HW rev %u, FW rev %u, %zu bytes", num_sensors, hw_rev, fw_rev, device_info_size);
+    return 0;
 }
 
 void ropods_ble_get_stats(uint32_t *packets_sent_out, uint32_t *bytes_sent_out, 
@@ -394,4 +404,63 @@ void ropods_ble_reset_stats(void)
 	bytes_sent = 0;
 	
 	LOG_DBG("Statistics reset");
+}
+
+int ropods_ble_register_device(const struct device *dev, uint8_t device_id) {
+    if (!dev || ble_device_count >= ROPODS_BLE_MAX_DEVICES) {
+        return -ENOMEM;
+    }
+    ble_devices[ble_device_count].dev = dev;
+    ble_devices[ble_device_count].device_id = device_id;
+    ble_device_count++;
+    LOG_INF("Registered device pointer for BLE: id=%d", device_id);
+    return 0;
+}
+
+static const struct device *find_device_by_id(uint8_t device_id) {
+    for (int i = 0; i < ble_device_count; ++i) {
+        if (ble_devices[i].device_id == device_id) {
+            return ble_devices[i].dev;
+        }
+    }
+    return NULL;
+}
+
+static int handle_control_command_direct(const struct ropods_control_command *cmd, struct ropods_control_response *resp) {
+    const struct device *dev = find_device_by_id(cmd->device_id);
+    if (!dev) {
+        resp->status = ROPODS_STATUS_INVALID_DEVICE;
+        return -ENODEV;
+    }
+    int ret = 0;
+    switch (cmd->command) {
+    case ROPODS_CMD_CHANNEL_ENABLE:
+        ret = sensor_manager_enable_channel(dev, (enum sensor_channel)cmd->channel_or_attr);
+        break;
+    case ROPODS_CMD_CHANNEL_DISABLE:
+        ret = sensor_manager_disable_channel(dev, (enum sensor_channel)cmd->channel_or_attr);
+        break;
+    case ROPODS_CMD_SET_ATTRIBUTE: {
+        struct sensor_value val;
+        val.val1 = cmd->value;
+        val.val2 = 0;
+        ret = sensor_attr_set(dev, (enum sensor_channel)cmd->channel_or_attr, (enum sensor_attribute)cmd->channel_or_attr, &val);
+        break;
+    }
+    case ROPODS_CMD_GET_ATTRIBUTE: {
+        struct sensor_value val;
+        ret = sensor_attr_get(dev, (enum sensor_channel)cmd->channel_or_attr, (enum sensor_attribute)cmd->channel_or_attr, &val);
+        if (ret == 0) {
+            resp->value = val.val1;
+        }
+        break;
+    }
+    default:
+        resp->status = ROPODS_STATUS_NOT_SUPPORTED;
+        return -ENOTSUP;
+    }
+    if (ret != 0) {
+        resp->status = ROPODS_STATUS_UNKNOWN_ERROR;
+    }
+    return ret;
 }

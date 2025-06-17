@@ -20,6 +20,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/device.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,7 @@ extern "C" {
 
 /* Maximum data packet size (MTU - headers) */
 #define ROPODS_BLE_MAX_DATA_SIZE        (247 - 3)
+#define ROPODS_BLE_MAX_DEVICES 4
 
 /* Generic data packet structure for streaming any type of data */
 struct ropods_data_packet {
@@ -58,14 +60,18 @@ struct ropods_data_packet {
 	uint8_t data[];              /**< Variable-length data payload */
 } __packed;
 
-/* Device information structure */
-struct ropods_device_info {
-	uint8_t device_id;           /**< Device identifier */
-	uint8_t device_location;     /**< Device location */
-	uint8_t device_type;         /**< Device type (IMU, env sensor, etc.) */
-	uint8_t num_channels;        /**< Number of available channels */
-	uint32_t capabilities;       /**< Device capability flags */
-	char device_name[16];        /**< Device name string */
+/* Device information structure for BLE characteristic */
+struct ropods_device_info_entry {
+    uint8_t sensor_id;       /* Sensor identifier */
+    uint8_t sensor_location; /* Sensor location */
+} __packed;
+
+/* Device info payload structure (for packing/unpacking) */
+struct ropods_device_info_payload {
+    uint8_t num_sensors;
+    struct ropods_device_info_entry sensors[ROPODS_BLE_MAX_DEVICES];
+    uint8_t hw_revision;
+    uint8_t fw_revision;
 } __packed;
 
 /* Generic control command types */
@@ -197,11 +203,13 @@ void ropods_ble_register_control_callback(ropods_control_callback_t callback);
 /**
  * @brief Update device information descriptor
  * 
- * @param devices Array of device information structures
- * @param count Number of devices
+ * @param sensors Array of device information structures
+ * @param num_sensors Number of sensors
+ * @param hw_rev Hardware revision
+ * @param fw_rev Firmware revision
  * @return 0 on success, negative error code on failure
  */
-int ropods_ble_update_device_info(const struct ropods_device_info *devices, uint8_t count);
+int ropods_ble_update_device_info(const struct ropods_device_info_entry *sensors, uint8_t num_sensors, uint8_t hw_rev, uint8_t fw_rev);
 
 /**
  * @brief Get connection statistics
@@ -216,6 +224,14 @@ void ropods_ble_get_stats(uint32_t *packets_sent, uint32_t *bytes_sent, uint32_t
  * @brief Reset connection statistics
  */
 void ropods_ble_reset_stats(void);
+
+/**
+ * Register a device pointer with the BLE service.
+ * @param dev Zephyr device pointer
+ * @param device_id Application-defined device ID
+ * @return 0 on success, negative error code on failure
+ */
+int ropods_ble_register_device(const struct device *dev, uint8_t device_id);
 
 #ifdef __cplusplus
 }
